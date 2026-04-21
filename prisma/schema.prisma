@@ -1,0 +1,172 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Pix_Maquina {
+  id                      String          @id @default(uuid())
+  pessoaId                String
+  clienteId               String
+  nome                    String
+  descricao               String?
+  store_id                String?
+  maquininha_serial       String?
+  estoque                 Int?
+  valorDoPix              String
+  valorDoPulso            String          @default("1")
+  dataInclusao            DateTime        @default(now())
+  ultimoPagamentoRecebido DateTime?
+  ultimaRequisicao        DateTime?
+  nivelDeSinal            Int?
+  bonusAtivo              Boolean         @default(false)
+  bonusRegras             Json?           @default("[{\"valorMinimo\": 10, \"bonus\": 2}, {\"valorMinimo\": 20, \"bonus\": 4}, {\"valorMinimo\": 50, \"bonus\": 10}]")
+  cliente                 Pix_Cliente     @relation(fields: [clienteId], references: [id])
+  pessoa                  Pix_Pessoa      @relation(fields: [pessoaId], references: [id])
+  Pagamento               Pix_Pagamento[]
+}
+
+model Pix_Pessoa {
+  id           String        @id @default(uuid())
+  nome         String
+  email        String        @unique
+  senha        String
+  dataInclusao DateTime      @default(now())
+  ultimoAcesso DateTime?
+  Pix_Cliente  Pix_Cliente[]
+  Maquina      Pix_Maquina[]
+}
+
+model Pix_Cliente {
+  id                   String                 @id @default(uuid())
+  nome                 String
+  email                String                 @unique
+  senha                String
+  mercadoPagoToken     String?
+  pagbankEmail         String?
+  pagbankToken         String?
+  pessoaId             String
+  dataInclusao         DateTime               @default(now())
+  ultimoAcesso         DateTime?
+  ativo                Boolean                @default(true)
+  dataVencimento       DateTime?
+  resetPasswordToken   String?
+  resetPasswordExpires DateTime?              @db.Timestamp(6)
+  status               String?
+  cep                  String?
+  endereco             String?
+  bairro               String?
+  numero               String?
+  cidade               String?
+  uf                   String?
+  complemento          String?
+  referencia           String?
+  pessoa               Pix_Pessoa             @relation(fields: [pessoaId], references: [id])
+  Maquina              Pix_Maquina[]
+  Pagamento            Pix_Pagamento[]
+  Cobranca             Pix_Cobranca[]
+  PagamentoCliente     Pix_PagamentoCliente[]
+}
+
+model Pix_Pagamento {
+  id                String       @id @default(uuid())
+  maquinaId         String
+  valor             String
+  mercadoPagoId     String?
+  estornado         Boolean
+  motivoEstorno     String?
+  tipo              String?
+  taxas             String?
+  clienteId         String?
+  operadora         String?
+  valorAcumulado    String?
+  data              DateTime     @default(now())
+  removido          Boolean?     @default(false)
+  cliente           Pix_Cliente? @relation(fields: [clienteId], references: [id])
+  maquina           Pix_Maquina  @relation(fields: [maquinaId], references: [id])
+}
+
+model ConfiguracaoMaquina {
+  codigo                  String   @id
+  operacao                Operacao
+  urlServidor             String
+  webhook01               String
+  webhook02               String
+  rotaConsultaStatusMaq   String
+  rotaConsultaAdimplencia String
+  idMaquina               String
+  idCliente               String
+  valor1                  Float
+  valor2                  Float
+  valor3                  Float
+  valor4                  Float
+  textoEmpresa            String
+  corPrincipal            String
+  corSecundaria           String
+  minValue                Float
+  maxValue                Float
+  identificadorMaquininha String
+  serialMaquininha        String
+  macaddressMaquininha    String
+  operadora               String
+  createdAt               DateTime @default(now())
+}
+
+model Monitoramento {
+  id                 String   @id @default(uuid())
+  maquinaId          String
+  ip                 String
+  dataHoraRequisicao DateTime @default(now())
+  intervalo          String?
+}
+
+model CreditoRemoto {
+  id        String   @id @default(uuid())
+  dataHora  DateTime @default(now())
+  email     String
+  ip        String
+  idMaquina String
+  valor     String?
+}
+
+model Pix_PagamentoCliente {
+  id               String      @id @default(uuid())
+  dataDeVencimento DateTime
+  dataDeRenovacao  DateTime?
+  valor            String
+  status           StatusPgto
+  dataDoPagamento  DateTime?
+  diaPagamento     Int
+  clienteId        String
+  Pix_Cliente      Pix_Cliente @relation(fields: [clienteId], references: [id])
+
+  @@map("pagamento-cliente")
+}
+
+model Pix_Cobranca {
+  id              String      @id @default(uuid())
+  valor           String
+  dataDeCriacao   DateTime    @default(now())
+  clienteId       String
+  dataDePagamento DateTime?
+  idPagamento     String?
+  dataDeRenovacao DateTime?
+  isVencido       Boolean?
+  cliente         Pix_Cliente @relation(fields: [clienteId], references: [id])
+
+  @@map("cobrancas")
+}
+
+enum Operacao {
+  ABERTO
+  FECHADO
+}
+
+enum StatusPgto {
+  ABERTO
+  VENCIDO
+  PAGO
+}
