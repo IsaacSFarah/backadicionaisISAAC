@@ -190,17 +190,14 @@ const PIX_CONFIG = {
  * @param valorPix Valor pago via PIX
  * @param valorPorPulso Valor base de cada pulso
  * @param maquina Objeto da máquina com configurações de bônus
- * @returns String formatada com 4 dígitos (ex: "0005")
+ * @returns Objeto com pulsos formatados e valor do bônus aplicado
  */
-function calcularPulsosDinamicos(valorPix: number, valorPorPulso: number = 1.0, maquina: any): string {
+function calcularPulsosDinamicos(valorPix: number, valorPorPulso: number = 1.0, maquina: any): { pulsos: string, bonus: number } {
   let pulsosBase = Math.floor(valorPix / valorPorPulso);
   let bonusExtra = 0;
 
   if (maquina && maquina.bonusAtivo) {
-    // Busca as regras de bônus da máquina ou usa as padrão se não existirem
     const regras = maquina.bonusRegras || [];
-    
-    // Ordena as regras do maior para o menor valor para aplicar o melhor bônus possível
     const regrasOrdenadas = Array.isArray(regras) 
       ? [...regras].sort((a: any, b: any) => b.valorMinimo - a.valorMinimo)
       : [];
@@ -208,13 +205,16 @@ function calcularPulsosDinamicos(valorPix: number, valorPorPulso: number = 1.0, 
     for (const regra of regrasOrdenadas) {
       if (valorPix >= regra.valorMinimo) {
         bonusExtra = regra.bonus;
-        break; // Aplica apenas o bônus da maior faixa atingida
+        break;
       }
     }
   }
 
   const total = pulsosBase + bonusExtra;
-  return ("0000" + total).slice(-4);
+  return {
+    pulsos: ("0000" + total).slice(-4),
+    bonus: bonusExtra
+  };
 }
 
 /**
@@ -490,7 +490,8 @@ const WEBHOOK_CONFIG = {
  */
 app.get("/consulta-maquina01", async (req, res) => {
   try {
-    const pulsosFormatados = calcularPulsosDinamicos(MAQUINAS.MAQUINA_01.valor);
+    const resultado = calcularPulsosDinamicos(MAQUINAS.MAQUINA_01.valor, 1.0, null);
+    const pulsosFormatados = resultado.pulsos;
 
     // Resetar valor e atualizar último acesso
     MAQUINAS.MAQUINA_01.valor = 0;
@@ -618,7 +619,8 @@ app.get("/monitoramento-html", async (req, res) => {
 
 
 app.get("/consulta-pix-efi-maq-batom-01", async (req, res) => {
-  var pulsosFormatados = calcularPulsosDinamicos(valordoPixMaquinaBatomEfi01 ?? 0); //<<<<<<ALTERAR PARA O NUMERO DA MAQUINA
+  const resultado = calcularPulsosDinamicos(valordoPixMaquinaBatomEfi01 ?? 0, 1.0, null);
+  var pulsosFormatados = resultado.pulsos;
 
   valordoPixMaquinaBatomEfi01 = 0; //<<<<<<<<<ALTERAR PARA O NUMERO DA MAQUINA
 
@@ -1833,11 +1835,36 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
     if (maquina) {
 
       // 🔢 CONVERTE PIX EM PULSOS COM LÓGICA DE BÔNUS DINÂMICO DA MÁQUINA
-      pulsosFormatados = calcularPulsosDinamicos(
+      const resultadoCalculo = calcularPulsosDinamicos(
         parseFloat(maquina.valorDoPix),
         parseFloat(maquina.valorDoPulso),
         maquina
       );
+
+      pulsosFormatados = resultadoCalculo.pulsos;
+
+      // Atualiza o registro do pagamento com o bônus liberado se for maior que zero
+      if (resultadoCalculo.bonus > 0) {
+        try {
+          // Busca o último pagamento pendente desta máquina para registrar o bônus
+          const ultimoPagamento = await prisma.pix_Pagamento.findFirst({
+            where: {
+              maquinaId: maquinaId,
+              valorBonus: 0
+            },
+            orderBy: { data: 'desc' }
+          });
+
+          if (ultimoPagamento) {
+            await prisma.pix_Pagamento.update({
+              where: { id: ultimoPagamento.id },
+              data: { valorBonus: resultadoCalculo.bonus }
+            });
+          }
+        } catch (error) {
+          console.error("Erro ao registrar bônus no pagamento:", error);
+        }
+      }
 
       // 🔥 LOG (opcional, ajuda debug)
       if (parseFloat(maquina.valorDoPix) > 0) {
@@ -2208,7 +2235,9 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
             ultimaRequisicao: maquina.ultimaRequisicao,
             status: status,
             pulso: maquina.valorDoPulso,
-            nivelDeSinal: maquina.nivelDeSinal
+            nivelDeSinal: maquina.nivelDeSinal,
+            bonusAtivo: maquina.bonusAtivo,
+            bonusRegras: maquina.bonusRegras
           });
         } else {
           maquinasComStatus.push({
@@ -2226,7 +2255,9 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
             ultimaRequisicao: maquina.ultimaRequisicao,
             status: "OFFLINE",
             pulso: maquina.valorDoPulso,
-            nivelDeSinal: maquina.nivelDeSinal
+            nivelDeSinal: maquina.nivelDeSinal,
+            bonusAtivo: maquina.bonusAtivo,
+            bonusRegras: maquina.bonusRegras
           });
         }
       }
@@ -2288,7 +2319,9 @@ app.get("/maquinas-adm", verifyJwtPessoa, async (req: any, res) => {
             ultimaRequisicao: maquina.ultimaRequisicao,
             status: status,
             pulso: maquina.valorDoPulso,
-            nivelDeSinal: maquina.nivelDeSinal
+            nivelDeSinal: maquina.nivelDeSinal,
+            bonusAtivo: maquina.bonusAtivo,
+            bonusRegras: maquina.bonusRegras
           });
         } else {
           maquinasComStatus.push({
@@ -2306,7 +2339,9 @@ app.get("/maquinas-adm", verifyJwtPessoa, async (req: any, res) => {
             ultimaRequisicao: maquina.ultimaRequisicao,
             status: "OFFLINE",
             pulso: maquina.valorDoPulso,
-            nivelDeSinal: maquina.nivelDeSinal
+            nivelDeSinal: maquina.nivelDeSinal,
+            bonusAtivo: maquina.bonusAtivo,
+            bonusRegras: maquina.bonusRegras
           });
         }
       }
@@ -6489,6 +6524,8 @@ app.get("/machines-adm", verifyJwtPessoa, async (req: any, res) => {
         store_id: maquina.store_id || "",
         maquininha_serial: maquina.maquininha_serial || "",
         nivelDeSinal: maquina.nivelDeSinal || null,
+        bonusAtivo: maquina.bonusAtivo,
+        bonusRegras: maquina.bonusRegras,
         clienteNome: maquina.cliente ? maquina.cliente.nome : "",
       };
 
@@ -6557,6 +6594,8 @@ app.get("/machines-client", verifyJWT, async (req: any, res) => {
         descricao: maquina.descricao || "",
         store_id: maquina.store_id || "",
         maquininha_serial: maquina.maquininha_serial || "",
+        bonusAtivo: maquina.bonusAtivo,
+        bonusRegras: maquina.bonusRegras,
         clienteNome: maquina.cliente ? maquina.cliente.nome : "",
       };
 

@@ -85,6 +85,8 @@ model Pix_Pagamento {
   valorAcumulado    String?
   data              DateTime     @default(now())
   removido          Boolean?     @default(false)
+  status            String?
+  valorBonus        Int?         @default(0)
   cliente           Pix_Cliente? @relation(fields: [clienteId], references: [id])
   maquina           Pix_Maquina  @relation(fields: [maquinaId], references: [id])
 }
