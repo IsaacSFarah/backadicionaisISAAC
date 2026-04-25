@@ -3887,7 +3887,7 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
       const novoPagamento = await prisma.pix_Pagamento.create({
         data: {
           maquinaId: maquina.id,
-          valor: String(value)
+          valor: String(value),
           mercadoPagoId: "CASH",
           motivoEstorno: ``,
           tipo: "CASH",
