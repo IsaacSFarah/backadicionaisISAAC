@@ -192,16 +192,31 @@ const PIX_CONFIG = {
  * @param maquina Objeto da máquina com configurações de bônus
  * @returns Objeto com pulsos formatados e valor do bônus aplicado
  */
-function calcularPulsosDinamicos(valorPix: number, valorPorPulso: number = 1.0, maquina: any): { pulsos: string, bonus: number } {
+function calcularPulsosDinamicos(
+  valorPix: number,
+  valorPorPulso: number = 1.0,
+  maquina: any,
+  metodoPagamento?: string
+): { pulsos: string, bonus: number } {
+
   let pulsosBase = Math.floor(valorPix / valorPorPulso);
   let bonusExtra = 0;
 
-  if (maquina && maquina.bonusAtivo) {
+  const podeAplicarBonus =
+  maquina &&
+  maquina.bonusAtivo &&
+  metodoPagamento !== "REMOTO" &&
+  Array.isArray(maquina.bonusMetodos) &&
+  metodoPagamento &&
+  maquina.bonusMetodos.includes(metodoPagamento);
+
+  if (podeAplicarBonus) {
     const regras = maquina.bonusRegras || [];
-    const regrasOrdenadas = Array.isArray(regras) 
+
+    const regrasOrdenadas = Array.isArray(regras)
       ? [...regras].sort((a: any, b: any) => b.valorMinimo - a.valorMinimo)
       : [];
-    
+
     for (const regra of regrasOrdenadas) {
       if (valorPix >= regra.valorMinimo) {
         bonusExtra = regra.bonus;
@@ -211,6 +226,7 @@ function calcularPulsosDinamicos(valorPix: number, valorPorPulso: number = 1.0, 
   }
 
   const total = pulsosBase + bonusExtra;
+
   return {
     pulsos: ("0000" + total).slice(-4),
     bonus: bonusExtra
@@ -720,46 +736,58 @@ app.post("/rota-recebimento-teste", async (req, res) => {
 
 app.post("/rota-recebimento-mercado-pago", async (req: any, res: any) => {
   try {
-    console.log("Novo pix do Mercado Pago:");
+    console.log("Novo pagamento do Mercado Pago:");
     console.log(req.body);
 
-    console.log("id");
-    console.log(req.query.id);
+    const url = "https://api.mercadopago.com/v1/payments/" + req.query.id;
+    const response: any = await axios.get(url);
 
-    var url = "https://api.mercadopago.com/v1/payments/" + req.query.id;
+    if (response.data.status != "approved") {
+      console.log("pagamento não aprovado!");
+      return res.status(200).json({ mensagem: "Pagamento não aprovado" });
+    }
 
-    axios.get(url)
-      .then((response: { data: { store_id: string; transaction_amount: number; status: string }; }) => {
-        //console.log('Response', response.data)
-        if (response.data.status != "approved") {
-          console.log("pagamento não aprovado!");
-          return;
-        }
+    let metodoPagamento = "PIX";
 
-        console.log('store_id', response.data.store_id);
-        console.log('storetransaction_amount_id', response.data.transaction_amount);
+    if (response.data.payment_type_id === "credit_card") {
+      metodoPagamento = "CREDITO";
+    } else if (response.data.payment_type_id === "debit_card") {
+      metodoPagamento = "DEBITO";
+    }
 
-        //creditar de acordo com o store_id (um para cada maq diferente)
-        if (response.data.store_id == '56155276') {
-          if (tempoOffline(ultimoAcessoMaquina01) >= 10) {
-            console.log("Efetuando estorno - Máquina Offline!")
-            estornar(req.query.id);
-          } else {
-            console.log("Creditando pix na máquina 1. store_id(56155276)")
-            valorDoPixMaquina01 = response.data.transaction_amount;
-            valordoPixPlaquinhaPixMP = response.data.transaction_amount;
-          }
-        }
+    const maquina = await prisma.pix_Maquina.findFirst({
+      where: { store_id: response.data.store_id }
+    });
 
-      })
+    if (!maquina) {
+      return res.status(200).json({ mensagem: "Máquina não encontrada" });
+    }
+
+    // ✅ CORREÇÃO DATE
+    if (maquina.ultimaRequisicao && tempoOffline(maquina.ultimaRequisicao) >= 10) {
+      await estornar(req.query.id);
+      return res.status(200).json({ mensagem: "Estornado - máquina offline" });
+    }
+
+    await prisma.pix_Maquina.update({
+      where: { id: maquina.id },
+      data: {
+        valorDoPix: String(response.data.transaction_amount), // ✅ FIX
+        metodoPagamento: metodoPagamento,
+        ultimoPagamentoRecebido: new Date()
+      }
+    });
+
+    valorDoPixMaquina01 = response.data.transaction_amount;
+    valordoPixPlaquinhaPixMP = response.data.transaction_amount;
+
+    return res.status(200).json({ mensagem: "ok" });
+
   } catch (error) {
     console.error(error);
-    return res.status(402).json({ "error": "error: " + error });
+    return res.status(402).json({ error: "error: " + error });
   }
-  return res.status(200).json({ "mensagem": "ok" });
 });
-
-
 
 //fim integração pix V2
 
@@ -1455,6 +1483,25 @@ app.put("/maquina", verifyJwtPessoa, async (req: any, res) => {
   }
 });
 
+app.get("/maquina/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const maquina = await prisma.pix_Maquina.findUnique({
+      where: { id },
+    });
+
+    if (!maquina) {
+      return res.status(404).json({ error: "Máquina não encontrada" });
+    }
+
+    return res.json(maquina);
+  } catch (error) {
+    console.error("Erro ao buscar máquina:", error);
+    return res.status(500).json({ error: "Erro interno" });
+  }
+});
+
 app.put("/maquina-cliente", verifyJWT, async (req: any, res) => {
   try {
     // Buscar a máquina pelo id e retornar o clienteId
@@ -1837,11 +1884,16 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
     if (maquina) {
 
       // 🔢 CONVERTE PIX EM PULSOS COM LÓGICA DE BÔNUS DINÂMICO DA MÁQUINA
-      const resultadoCalculo = calcularPulsosDinamicos(
-        parseFloat(maquina.valorDoPix),
-        parseFloat(maquina.valorDoPulso),
-        maquina
-      );
+      
+
+const metodoPagamento = maquina.metodoPagamento || "PIX";
+
+const resultadoCalculo = calcularPulsosDinamicos(
+  parseFloat(maquina.valorDoPix || "0"),
+  parseFloat(maquina.valorDoPulso || "1"),
+  maquina,
+  metodoPagamento
+);
 
       pulsosFormatados = resultadoCalculo.pulsos;
 
@@ -1950,7 +2002,7 @@ app.post("/credito-remoto", verifyJwtPessoa, async (req: any, res) => {
 
       //VERIFICAR SE A MAQUINA ESTA ONINE
       if (maquina.ultimaRequisicao) {
-        var status = (tempoOffline(new Date(maquina.ultimaRequisicao))) > 60 ? "OFFLINE" : "ONLINE";
+        var status = (tempoOffline(maquina.ultimaRequisicao)) > 60 ? "OFFLINE" : "ONLINE";
         console.log(status);
         if (status == "OFFLINE") {
           return res.status(400).json({ "msg": "MÁQUINA OFFLINE!" });
@@ -1960,14 +2012,15 @@ app.post("/credito-remoto", verifyJwtPessoa, async (req: any, res) => {
       }
 
       await prisma.pix_Maquina.update({
-        where: {
-          id: req.body.id
-        },
-        data: {
-          valorDoPix: req.body.valor,
-          ultimoPagamentoRecebido: new Date(Date.now())
-        }
-      });
+  where: {
+    id: req.body.id
+  },
+  data: {
+    valorDoPix: String(req.body.valor), // 🔥 FIX
+    metodoPagamento: "REMOTO",         // 🔥 ESSENCIAL
+    ultimoPagamentoRecebido: new Date()
+  }
+});
 
       //registrando quem fez o crédito remoto
       var adm = await prisma.pix_Pessoa.findUnique({
@@ -2026,7 +2079,7 @@ app.post("/credito-remoto-cliente", verifyJWT, async (req: any, res) => {
 
       //VERIFICAR SE A MAQUINA ESTA ONINE
       if (maquina.ultimaRequisicao) {
-        var status = (tempoOffline(new Date(maquina.ultimaRequisicao))) > 60 ? "OFFLINE" : "ONLINE";
+        var status = tempoOffline(maquina.ultimaRequisicao) > 60 ? "OFFLINE" : "ONLINE";
         console.log(status);
         if (status == "OFFLINE") {
           return res.status(400).json({ "msg": "MÁQUINA OFFLINE!" });
@@ -3805,7 +3858,6 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
 
   try {
 
-    //BUSCAR QUAL MÁQUINA ESTÁ SENDO UTILIZADA (id da máquina)
     const maquina = await prisma.pix_Maquina.findUnique({
       where: {
         id: req.params.id,
@@ -3815,17 +3867,27 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
       }
     });
 
-    const value = req.query.valor;
+    const value = Number(req.query.valor);
 
-    //PROCESSAR O PAGAMENTO (se eu tiver uma máquina com store_id cadastrado)
     if (maquina) {
 
-      console.log(`recebendo pagamento na máquina: ${maquina.nome}`)
-      //REGISTRAR O PAGAMENTO
+      console.log(`recebendo pagamento na máquina: ${maquina.nome}`);
+
+      // 🔥 ATUALIZA A MÁQUINA (ESSENCIAL)
+      await prisma.pix_Maquina.update({
+        where: { id: maquina.id },
+        data: {
+          valorDoPix: String(value),
+          metodoPagamento: "ESPECIE", // 👈 ESSA LINHA FAZ TUDO FUNCIONAR
+          ultimoPagamentoRecebido: new Date()
+        }
+      });
+
+      // 🔥 REGISTRO (MANTIDO)
       const novoPagamento = await prisma.pix_Pagamento.create({
         data: {
           maquinaId: maquina.id,
-          valor: value,
+          valor: String(value)
           mercadoPagoId: "CASH",
           motivoEstorno: ``,
           tipo: "CASH",
@@ -3835,16 +3897,19 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
       });
 
       if (NOTIFICACOES_PAGAMENTOS_ESPECIE) {
-        notificarDiscord(DISCORD_WEBHOOKS.PAGAMENTOS_ESPECIE, `Novo pagamento recebido. R$: ${novoPagamento.valor.toString()}`, ` Maquina: ${maquina?.nome}. Maquina: ${maquina?.descricao}`)
+        notificarDiscord(
+          DISCORD_WEBHOOKS.PAGAMENTOS_ESPECIE,
+          `Novo pagamento recebido. R$: ${novoPagamento.valor.toString()}`,
+          `Maquina: ${maquina?.nome}. Descrição: ${maquina?.descricao}`
+        );
       }
 
       return res.status(200).json({ "pagamento registrado": "Pagamento registrado" });
-    }
-    else {
-      console.log("error.. cliente nulo ou não encontrado!");
-      return res.status(404).json({ "retorno": "error.. máquina nulo ou não encontrado!" });
-    }
 
+    } else {
+      console.log("error.. máquina não encontrada!");
+      return res.status(404).json({ "retorno": "Máquina não encontrada!" });
+    }
 
   } catch (error) {
     console.error(error);
