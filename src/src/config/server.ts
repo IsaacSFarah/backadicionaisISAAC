@@ -1921,36 +1921,16 @@ const resultadoCalculo = calcularPulsosDinamicos(
       }
 
       // 🔥 LOG (opcional, ajuda debug)
- const metodoPagamento = (maquina as any)?.metodoPagamento ?? "PIX";
-
-const valor = parseFloat(maquina.valorDoPix || "0");
-const valorPulso = parseFloat(maquina.valorDoPulso || "1");
-
-const resultado: any = calcularPulsosDinamicos(
-  valor,
-  valorPulso,
-  maquina,
-  metodoPagamento
-);
-
-const pulsos = resultado?.pulsos ?? 0;
-const bonus = resultado?.bonusAplicado ?? resultado?.bonus ?? 0;
-const teveBonus = bonus > 0;
-
-console.log(`
-💳 CRÉDITO CONSUMIDO
-🏧 Máquina: ${maquina.nome} (${maquina.id})
-💰 Valor recebido: R$ ${valor}
-💸 Valor por pulso: R$ ${valorPulso}
-⚙️ Método: ${metodoPagamento}
-
-🎯 Pulsos liberados: ${pulsos}
-🎁 Bônus aplicado: ${teveBonus ? "SIM" : "NÃO"}
-➕ Pulsos de bônus: ${bonus}
-
+      if (parseFloat(maquina.valorDoPix) > 0) {
+        console.log(`
+🚀 CRÉDITO CONSUMIDO
+🏪 Máquina: ${maquina.nome} (${maquina.id})
+💰 Valor: ${maquina.valorDoPix}
 📶 Sinal: ${nivelDeSinal}
-⏱️ ${new Date().toISOString()}
+🕒 ${new Date().toISOString()}
 `);
+      }
+
       // 🔥 ATUALIZA MÁQUINA
       await prisma.pix_Maquina.update({
         where: {
