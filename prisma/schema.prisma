@@ -25,6 +25,7 @@ model Pix_Maquina {
   bonusAtivo              Boolean         @default(false)
   bonusRegras             Json?           @default("[{\"valorMinimo\": 10, \"bonus\": 2}, {\"valorMinimo\": 20, \"bonus\": 4}, {\"valorMinimo\": 50, \"bonus\": 10}]")
   bonusMetodos Json? @default("[\"PIX\"]")
+  metodoPagamento String?
   cliente                 Pix_Cliente     @relation(fields: [clienteId], references: [id])
   pessoa                  Pix_Pessoa      @relation(fields: [pessoaId], references: [id])
   Pagamento               Pix_Pagamento[]
