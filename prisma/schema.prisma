@@ -24,6 +24,7 @@ model Pix_Maquina {
   nivelDeSinal            Int?
   bonusAtivo              Boolean         @default(false)
   bonusRegras             Json?           @default("[{\"valorMinimo\": 10, \"bonus\": 2}, {\"valorMinimo\": 20, \"bonus\": 4}, {\"valorMinimo\": 50, \"bonus\": 10}]")
+  bonusMetodos Json? @default("[\"PIX\"]")
   cliente                 Pix_Cliente     @relation(fields: [clienteId], references: [id])
   pessoa                  Pix_Pessoa      @relation(fields: [pessoaId], references: [id])
   Pagamento               Pix_Pagamento[]
