@@ -1428,6 +1428,7 @@ app.put("/maquina", verifyJwtPessoa, async (req: any, res) => {
       estoque: req.body.estoque,
       bonusAtivo: req.body.bonusAtivo,
       bonusRegras: req.body.bonusRegras,
+      bonusMetodos: req.body.bonusMetodos,
     };
 
     // Atualiza store_id somente se vier no body; vazio limpa explicitamente
@@ -1508,6 +1509,7 @@ app.put("/maquina-cliente", verifyJWT, async (req: any, res) => {
       estoque: req.body.estoque,
       bonusAtivo: req.body.bonusAtivo,
       bonusRegras: req.body.bonusRegras,
+      bonusMetodos: req.body.bonusMetodos,
     };
 
     // Atualiza store_id somente se vier no body; vazio limpa explicitamente
