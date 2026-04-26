@@ -7625,7 +7625,7 @@ app.post("/usar-link/:id", async (req, res) => {
       "LINK",
       ip,
       maquina.id,
-      link.valor
+      String(link.valor)
     );
 
     // 🔥 marca como usado
