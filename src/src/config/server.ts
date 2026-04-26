@@ -7601,14 +7601,15 @@ app.post("/usar-link/:id", async (req, res) => {
     }
 
     const maquina = await prisma.pix_Maquina.findUnique({
-      where: { id: link.maquinaId }
+      where: { id: link.maquinaId },
+      include: { cliente: true }
     });
 
-    // 🔥 VALIDAÇÃO IMPORTANTE
     if (!maquina) {
       return res.status(404).json({ error: "Máquina não encontrada" });
     }
 
+    // 🔥 mesma lógica do crédito remoto
     await prisma.pix_Maquina.update({
       where: { id: maquina.id },
       data: {
@@ -7618,27 +7619,27 @@ app.post("/usar-link/:id", async (req, res) => {
       }
     });
 
-    // 🔥 LIBERAÇÃO REAL
-    await axios.get(
-      `${process.env.BASE_URL}/consultar-maquina/${maquina.id}`
+    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+
+    registrarCreditoRemoto(
+      "LINK",
+      ip,
+      maquina.id,
+      link.valor
     );
 
+    // 🔥 marca como usado
     await prisma.pix_Link.update({
       where: { id },
       data: { usado: true }
     });
 
-    console.log(`
-🔗 CRÉDITO POR LINK
-🏪 Máquina: ${maquina.nome}
-💰 Valor: ${link.valor}
-🕒 ${new Date().toISOString()}
-`);
+    console.log(`🔗 CRÉDITO POR LINK OK`);
 
     return res.json({ sucesso: true });
 
   } catch (err) {
-    console.error("❌ ERRO USAR LINK:", err);
+    console.error("❌ ERRO:", err);
     return res.status(500).json({ error: "Erro ao usar link" });
   }
 });
