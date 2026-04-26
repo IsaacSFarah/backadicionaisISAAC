@@ -7559,7 +7559,82 @@ app.get("/auditoria-pagamentos-detalhe/:id", verifyJwtPessoa, async (req: any, r
   }
 });
 
+app.post("/gerar-link", verifyJWT, async (req: any, res) => {
+  try {
+    const { maquinaId, valor } = req.body;
 
+    const id = gerarNumeroAleatorio();
+
+    await prisma.pix_Link.create({
+      data: {
+        id,
+        maquinaId,
+        valor,
+        usado: false
+      }
+    });
+
+    return res.json({
+      link: `${process.env.FRONT_URL}/liberar/${id}`
+    });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Erro ao gerar link" });
+  }
+});
+
+app.post("/usar-link/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const link = await prisma.pix_Link.findUnique({
+      where: { id }
+    });
+
+    if (!link || link.usado) {
+      return res.status(400).json({ error: "Link inválido ou já usado" });
+    }
+
+    const maquina = await prisma.pix_Maquina.findUnique({
+      where: { id: link.maquinaId }
+    });
+
+    if (!maquina) {
+      return res.status(404).json({ error: "Máquina não encontrada" });
+    }
+
+    // 🔥 LIBERA CRÉDITO (USANDO SUA LÓGICA EXISTENTE)
+    await prisma.pix_Maquina.update({
+      where: { id: maquina.id },
+      data: {
+        valorDoPix: String(link.valor),
+        metodoPagamento: "LINK",
+        ultimoPagamentoRecebido: new Date()
+      }
+    });
+
+    // 🔥 MARCA COMO USADO
+    await prisma.pix_Link.update({
+      where: { id },
+      data: { usado: true }
+    });
+
+    // 🔥 LOG (igual crédito remoto)
+    console.log(`
+🔗 CRÉDITO POR LINK
+🏪 Máquina: ${maquina.nome}
+💰 Valor: ${link.valor}
+🕒 ${new Date().toISOString()}
+`);
+
+    return res.json({ sucesso: true });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Erro ao usar link" });
+  }
+});
 
 
 
