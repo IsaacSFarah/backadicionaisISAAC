@@ -7561,6 +7561,8 @@ app.get("/auditoria-pagamentos-detalhe/:id", verifyJwtPessoa, async (req: any, r
 
 app.post("/gerar-link", verifyJWT, async (req: any, res) => {
   try {
+    console.log("🔥 GERAR LINK CHAMADO");
+
     const { maquinaId, valor } = req.body;
 
     const id = gerarNumeroAleatorio();
@@ -7569,7 +7571,7 @@ app.post("/gerar-link", verifyJWT, async (req: any, res) => {
       data: {
         id,
         maquinaId,
-        valor: parseFloat(valor), // 🔥 AQUI É A CORREÇÃO
+        valor: parseFloat(valor),
         usado: false
       }
     });
