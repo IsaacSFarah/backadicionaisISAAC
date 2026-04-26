@@ -182,5 +182,5 @@ model pix_Link {
   usado     Boolean  @default(false)
   createdAt DateTime @default(now())
 
-  maquina   pix_Maquina @relation(fields: [maquinaId], references: [id])
+  maquina   Pix_Maquina @relation(fields: [maquinaId], references: [id])
 }
