@@ -7609,7 +7609,18 @@ app.post("/usar-link/:id", async (req, res) => {
       return res.status(404).json({ error: "Máquina não encontrada" });
     }
 
-    // 🔥 mesma lógica do crédito remoto
+    // 🔥 VERIFICAR ANTES DE LIBERAR
+    if (maquina.ultimaRequisicao) {
+      const status = tempoOffline(maquina.ultimaRequisicao) > 60 ? "OFFLINE" : "ONLINE";
+
+      if (status === "OFFLINE") {
+        return res.status(400).json({ msg: "MÁQUINA OFFLINE!" });
+      }
+    } else {
+      return res.status(400).json({ msg: "MÁQUINA OFFLINE!" });
+    }
+
+    // 🔥 AGORA SIM LIBERA
     await prisma.pix_Maquina.update({
       where: { id: maquina.id },
       data: {
