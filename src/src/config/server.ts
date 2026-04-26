@@ -7569,7 +7569,7 @@ app.post("/gerar-link", verifyJWT, async (req: any, res) => {
       data: {
         id,
         maquinaId,
-        valor,
+        valor: parseFloat(valor), // 🔥 AQUI É A CORREÇÃO
         usado: false
       }
     });
@@ -7579,8 +7579,8 @@ app.post("/gerar-link", verifyJWT, async (req: any, res) => {
     });
 
   } catch (err) {
-    console.error(err);
-    return res.status(500).json({ error: "Erro ao gerar link" });
+    console.error("ERRO GERAR LINK:", err);
+    return res.status(500).json({ error: err });
   }
 });
 
