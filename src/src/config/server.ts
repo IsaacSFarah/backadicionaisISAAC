@@ -7655,6 +7655,51 @@ app.post("/usar-link/:id", async (req, res) => {
   }
 });
 
+app.get("/link/:id", async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const link = await prisma.pix_Link.findUnique({
+      where: { id }
+    });
+
+    if (!link) {
+      return res.status(404).json({ error: "Link não encontrado" });
+    }
+
+    if (link.usado) {
+      return res.status(400).json({ error: "Link já utilizado" });
+    }
+
+    const maquina = await prisma.pix_Maquina.findUnique({
+      where: { id: link.maquinaId }
+    });
+
+    if (!maquina) {
+      return res.status(404).json({ error: "Máquina não encontrada" });
+    }
+
+    let status = "OFFLINE";
+
+    if (maquina.ultimaRequisicao) {
+      status =
+        tempoOffline(maquina.ultimaRequisicao) > 60
+          ? "OFFLINE"
+          : "ONLINE";
+    }
+
+    return res.json({
+      valor: link.valor,
+      maquina: maquina.nome,
+      status
+    });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "Erro ao buscar link" });
+  }
+});
+
 
 
 //git add . 
