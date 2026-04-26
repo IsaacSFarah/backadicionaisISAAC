@@ -29,6 +29,7 @@ model Pix_Maquina {
   cliente                 Pix_Cliente     @relation(fields: [clienteId], references: [id])
   pessoa                  Pix_Pessoa      @relation(fields: [pessoaId], references: [id])
   Pagamento               Pix_Pagamento[]
+   Link                    pix_Link[]
 }
 
 model Pix_Pessoa {
