@@ -7619,7 +7619,7 @@ app.post("/usar-link/:id", async (req, res) => {
       }
     });
 
-    const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+    const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || "");
 
     registrarCreditoRemoto(
       "LINK",
