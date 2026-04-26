@@ -174,3 +174,13 @@ enum StatusPgto {
   VENCIDO
   PAGO
 }
+
+model pix_Link {
+  id        String   @id
+  maquinaId String
+  valor     Float
+  usado     Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  maquina   pix_Maquina @relation(fields: [maquinaId], references: [id])
+}
