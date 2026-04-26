@@ -7600,16 +7600,16 @@ app.post("/usar-link/:id", async (req, res) => {
       return res.status(400).json({ error: "Link inválido ou já usado" });
     }
 
-    const maquina = await prisma.Pix_Maquina.findUnique({
+    const maquina = await prisma.pix_Maquina.findUnique({
       where: { id: link.maquinaId }
     });
 
+    // 🔥 VALIDAÇÃO IMPORTANTE
     if (!maquina) {
       return res.status(404).json({ error: "Máquina não encontrada" });
     }
 
-    // 🔥 SALVA O PAGAMENTO (igual PIX)
-    await prisma.Pix_Maquina.update({
+    await prisma.pix_Maquina.update({
       where: { id: maquina.id },
       data: {
         valorDoPix: String(link.valor),
@@ -7618,12 +7618,11 @@ app.post("/usar-link/:id", async (req, res) => {
       }
     });
 
-    // 🔥 CHAMA A LIBERAÇÃO REAL
+    // 🔥 LIBERAÇÃO REAL
     await axios.get(
       `${process.env.BASE_URL}/consultar-maquina/${maquina.id}`
     );
 
-    // 🔥 MARCA COMO USADO
     await prisma.pix_Link.update({
       where: { id },
       data: { usado: true }
