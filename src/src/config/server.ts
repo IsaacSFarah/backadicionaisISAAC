@@ -2286,21 +2286,7 @@ const inicioDia = new Date(Date.UTC(
 ));
 
 // 🔥 query
-const pagamentosHoje = await prisma.pix_Pagamento.findMany({
-  where: {
-    data: {
-      gte: inicioDia,
-    },
-    OR: [
-      { removido: false },
-      { removido: null }
-    ]
-  },
-  select: {
-    maquinaId: true,
-    valor: true,
-  },
-});
+const pagamentosHoje = await prisma.pix_Pagamento.findMany();
 
     // 🔥 soma manual (valor é string)
     const faturamentoMap: Record<string, number> = {};
