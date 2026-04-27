@@ -2278,28 +2278,43 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
       return res.status(200).json([]);
     }
 
-    // 🔥 início do dia (UTC correto)
-const inicioDia = new Date(Date.UTC(
-  new Date().getUTCFullYear(),
-  new Date().getUTCMonth(),
-  new Date().getUTCDate()
-));
+    // 🔥 início do dia (LOCAL - mais seguro pro seu caso)
+    const inicioDia = new Date();
+    inicioDia.setHours(0, 0, 0, 0);
 
-// 🔥 query
-const pagamentosHoje = await prisma.pix_Pagamento.findMany();
+    // 🔥 BUSCA SOMENTE HOJE
+    const pagamentosHoje = await prisma.pix_Pagamento.findMany({
+      where: {
+        data: {
+          gte: inicioDia,
+        },
+        OR: [
+          { removido: false },
+          { removido: null }
+        ]
+      },
+      select: {
+        maquinaId: true,
+        valor: true,
+      },
+    });
 
-    // 🔥 soma manual (valor é string)
+    // 🔥 soma correta (corrigido milhar + vírgula)
     const faturamentoMap: Record<string, number> = {};
 
     pagamentosHoje.forEach((p) => {
-  const valor = Number((p.valor || "0").replace(",", "."));
+      const valor = Number(
+        (p.valor || "0")
+          .replace(/\./g, "") // remove milhar
+          .replace(",", ".")  // decimal correto
+      );
 
-  if (!faturamentoMap[p.maquinaId]) {
-    faturamentoMap[p.maquinaId] = 0;
-  }
+      if (!faturamentoMap[p.maquinaId]) {
+        faturamentoMap[p.maquinaId] = 0;
+      }
 
-  faturamentoMap[p.maquinaId] += valor;
-});
+      faturamentoMap[p.maquinaId] += valor;
+    });
 
     const maquinasComStatus = [];
 
