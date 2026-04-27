@@ -2245,13 +2245,29 @@ app.post("/login-cliente", async (req, res) => {
 
 
 //maquinas exibir as máquinas de um cliente logado
+// 🔥 CACHE POR CLIENTE
+const cache: Record<string, any> = {};
+const cacheTime: Record<string, number> = {};
+
 app.get("/maquinas", verifyJWT, async (req: any, res) => {
-  console.log(`${req.userId} acessou a rota que busca todas as máquinas.`);
+  const userId = req.userId;
+
+  console.log(`${userId} acessou máquinas`);
 
   try {
+    const agora = Date.now();
+
+    // 🔥 CACHE 30 MIN
+    if (cache[userId] && (agora - cacheTime[userId]) < 1800000) {
+      console.log("⚡ usando cache");
+      return res.status(200).json(cache[userId]);
+    }
+
+    console.log("🔄 buscando do banco");
+
     const maquinas = await prisma.pix_Maquina.findMany({
       where: {
-        clienteId: req.userId,
+        clienteId: userId,
       },
       orderBy: {
         dataInclusao: "asc",
@@ -2266,25 +2282,31 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
     const hoje = new Date();
     hoje.setHours(0, 0, 0, 0);
 
-    // 🔥 1 QUERY (faturamento do dia)
-    const faturamentoPorMaquina = await prisma.pix_Pagamento.groupBy({
-      by: ["maquinaId"],
+    // 🔥 1 QUERY (pagamentos do dia)
+    const pagamentosHoje = await prisma.pix_Pagamento.findMany({
       where: {
-        data: { // ✅ campo correto
+        data: {
           gte: hoje,
         },
-        removido: false, // 🔥 opcional mas recomendado
+        removido: false,
       },
-      _sum: {
-        valor: true, // ⚠️ é string → vamos converter depois
+      select: {
+        maquinaId: true,
+        valor: true,
       },
     });
 
-    // 🔥 transforma em mapa rápido
+    // 🔥 soma manual (valor é string)
     const faturamentoMap: Record<string, number> = {};
 
-    faturamentoPorMaquina.forEach((f) => {
-      faturamentoMap[f.maquinaId] = Number(f._sum?.valor || 0);
+    pagamentosHoje.forEach((p) => {
+      const valor = Number(p.valor || 0);
+
+      if (!faturamentoMap[p.maquinaId]) {
+        faturamentoMap[p.maquinaId] = 0;
+      }
+
+      faturamentoMap[p.maquinaId] += valor;
     });
 
     const maquinasComStatus = [];
@@ -2323,13 +2345,17 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
         ultimoPagamentoRecebido: maquina.ultimoPagamentoRecebido,
         ultimaRequisicao: maquina.ultimaRequisicao,
         status,
-        faturamentoHoje, // 💰 valor do dia
+        faturamentoHoje,
         pulso: maquina.valorDoPulso,
         nivelDeSinal: maquina.nivelDeSinal,
         bonusAtivo: maquina.bonusAtivo,
         bonusRegras: maquina.bonusRegras,
       });
     }
+
+    // 🔥 salva cache
+    cache[userId] = maquinasComStatus;
+    cacheTime[userId] = agora;
 
     return res.status(200).json(maquinasComStatus);
 
