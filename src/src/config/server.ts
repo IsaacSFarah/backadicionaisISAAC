@@ -2292,14 +2292,14 @@ const pagamentosHoje = await prisma.pix_Pagamento.findMany();
     const faturamentoMap: Record<string, number> = {};
 
     pagamentosHoje.forEach((p) => {
-      const valor = Number(p.valor || 0);
+  const valor = Number((p.valor || "0").replace(",", "."));
 
-      if (!faturamentoMap[p.maquinaId]) {
-        faturamentoMap[p.maquinaId] = 0;
-      }
+  if (!faturamentoMap[p.maquinaId]) {
+    faturamentoMap[p.maquinaId] = 0;
+  }
 
-      faturamentoMap[p.maquinaId] += valor;
-    });
+  faturamentoMap[p.maquinaId] += valor;
+});
 
     const maquinasComStatus = [];
 
