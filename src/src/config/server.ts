@@ -2252,106 +2252,66 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
   const userId = req.userId;
 
   try {
-    const agora = Date.now(); // ✅ número correto
+    const agora = Date.now();
 
-    // 🔥 CACHE 5 MIN
+    // 🔥 cache 5 min
     if (cache[userId] && (agora - cacheTime[userId]) < 300000) {
-      console.log("⚡ usando cache");
-      return res.status(200).json(cache[userId]);
+      return res.json(cache[userId]);
     }
-
-    console.log("🔄 buscando do banco");
 
     const maquinas = await prisma.pix_Maquina.findMany({
-      where: { clienteId: userId },
-      orderBy: { dataInclusao: "asc" },
+      where: { clienteId: userId }
     });
 
-    if (maquinas.length === 0) {
-      return res.status(200).json([]);
-    }
+    if (!maquinas.length) return res.json([]);
 
-    // 🔥 início do dia (BR)
-    const inicioDia = new Date();
-    inicioDia.setHours(0, 0, 0, 0);
-
-    // 🔥 pagamentos do dia
-    const pagamentosHoje = await prisma.pix_Pagamento.findMany({
-      where: {
-        data: { gte: inicioDia },
-      },
+    // 🔥 pega TODOS pagamentos (sem filtro de data)
+    const pagamentos = await prisma.pix_Pagamento.findMany({
       select: {
         maquinaId: true,
         valor: true,
-      },
+        data: true
+      }
     });
 
-    // 🔥 soma correta (com milhar)
+    const hoje = new Date();
+    hoje.setHours(0, 0, 0, 0);
+
     const faturamentoMap: Record<string, number> = {};
 
-    pagamentosHoje.forEach((p: any) => {
-      const valor = Number(
-        String(p.valor || "0")
-          .replace(/\./g, "") // remove milhar
-          .replace(",", ".")  // decimal
-      );
+    pagamentos.forEach((p: any) => {
+      const dataPagamento = new Date(p.data);
 
-      if (!faturamentoMap[p.maquinaId]) {
-        faturamentoMap[p.maquinaId] = 0;
-      }
+      // 🔥 filtra manualmente (muito mais confiável)
+      if (dataPagamento >= hoje) {
 
-      faturamentoMap[p.maquinaId] += valor;
-    });
+        const valor = Number(
+          String(p.valor || "0")
+            .replace(/\./g, "")
+            .replace(",", ".")
+        );
 
-    const maquinasComStatus = maquinas.map((maquina) => {
-      let status = "OFFLINE";
-
-      if (maquina.ultimaRequisicao) {
-        status =
-          tempoOffline(new Date(maquina.ultimaRequisicao)) > 60
-            ? "OFFLINE"
-            : "ONLINE";
-
-        if (
-          status === "ONLINE" &&
-          maquina.ultimoPagamentoRecebido &&
-          tempoOffline(new Date(maquina.ultimoPagamentoRecebido)) < 1800
-        ) {
-          status = "PAGAMENTO_RECENTE";
+        if (!faturamentoMap[p.maquinaId]) {
+          faturamentoMap[p.maquinaId] = 0;
         }
-      }
 
-      return {
-        id: maquina.id,
-        nome: maquina.nome,
-        status,
-        faturamentoHoje: faturamentoMap[maquina.id] || 0,
-        maquinaId: maquina.maquininha_serial,
-        pessoaId: maquina.pessoaId,
-        clienteId: maquina.clienteId,
-        descricao: maquina.descricao,
-        estoque: maquina.estoque,
-        store_id: maquina.store_id,
-        valorDoPix: maquina.valorDoPix,
-        dataInclusao: maquina.dataInclusao,
-        ultimoPagamentoRecebido: maquina.ultimoPagamentoRecebido,
-        ultimaRequisicao: maquina.ultimaRequisicao,
-        pulso: maquina.valorDoPulso,
-        nivelDeSinal: maquina.nivelDeSinal,
-        bonusAtivo: maquina.bonusAtivo,
-        bonusRegras: maquina.bonusRegras,
-      };
+        faturamentoMap[p.maquinaId] += valor;
+      }
     });
 
-    // 🔥 salva cache
-    cache[userId] = maquinasComStatus;
+    const resultado = maquinas.map((m) => ({
+      ...m,
+      faturamentoHoje: faturamentoMap[m.id] || 0
+    }));
+
+    cache[userId] = resultado;
     cacheTime[userId] = agora;
 
-    return res.status(200).json(maquinasComStatus);
+    return res.json(resultado);
 
-  } catch (err: any) {
+  } catch (err) {
     console.error(err);
-    return res.status(500).json({ retorno: "ERRO" });
+    return res.status(500).json({ erro: "erro" });
   }
 });
 
