@@ -2246,26 +2246,99 @@ app.post("/login-cliente", async (req, res) => {
 
 //maquinas exibir as máquinas de um cliente logado
 app.get("/maquinas", verifyJWT, async (req: any, res) => {
-
   console.log(`${req.userId} acessou a rota que busca todos as máquinas.`);
 
   try {
-
     const maquinas = await prisma.pix_Maquina.findMany({
       where: {
         clienteId: req.userId,
       },
       orderBy: {
-        dataInclusao: 'asc', // 'asc' para ordenação ascendente, 'desc' para ordenação descendente.
+        dataInclusao: "asc",
       },
     });
 
-    if (maquinas != null) {
-      console.log("encontrou");
+    if (maquinas.length === 0) {
+  return res.status(200).json([]);
+   }
 
-      const maquinasComStatus = [];
+    const hoje = new Date();
+    hoje.setHours(0, 0, 0, 0);
 
-      for (const maquina of maquinas) {
+    // 🔥 1 query só
+    const faturamentoPorMaquina = await prisma.pix_Pagamento.groupBy({
+      by: ["maquinaId"],
+      where: {
+        createdAt: {
+          gte: hoje,
+        },
+      },
+      _sum: {
+        valor: true,
+      },
+    });
+
+    // 🔥 transforma em mapa rápido
+    const faturamentoMap: Record<number, number> = {};
+
+faturamentoPorMaquina.forEach((f) => {
+  faturamentoMap[f.maquinaId] = Number(f._sum.valor || 0);
+});
+    const maquinasComStatus = [];
+
+    for (const maquina of maquinas) {
+      const faturamentoHoje = faturamentoMap[maquina.id] || 0;
+
+      let status = "OFFLINE";
+
+      if (maquina.ultimaRequisicao) {
+        status =
+          tempoOffline(new Date(maquina.ultimaRequisicao)) > 60
+            ? "OFFLINE"
+            : "ONLINE";
+
+        if (
+          status === "ONLINE" &&
+          maquina.ultimoPagamentoRecebido &&
+          tempoOffline(new Date(maquina.ultimoPagamentoRecebido)) < 1800
+        ) {
+          status = "PAGAMENTO_RECENTE";
+        }
+      }
+
+      maquinasComStatus.push({
+        id: maquina.id,
+        pessoaId: maquina.pessoaId,
+        clienteId: maquina.clienteId,
+        nome: maquina.nome,
+        descricao: maquina.descricao,
+        estoque: maquina.estoque,
+        store_id: maquina.store_id,
+        maquininha_serial: maquina.maquininha_serial,
+        valorDoPix: maquina.valorDoPix,
+        dataInclusao: maquina.dataInclusao,
+        ultimoPagamentoRecebido: maquina.ultimoPagamentoRecebido,
+        ultimaRequisicao: maquina.ultimaRequisicao,
+        status,
+        faturamentoHoje, // ✅ agora vindo otimizado
+        pulso: maquina.valorDoPulso,
+        nivelDeSinal: maquina.nivelDeSinal,
+        bonusAtivo: maquina.bonusAtivo,
+        bonusRegras: maquina.bonusRegras,
+      });
+    }
+
+    return res.status(200).json(maquinasComStatus);
+  } catch (err: any) {
+    console.log(err);
+    return res.status(500).json({ retorno: "ERRO" });
+  }
+});
+
+const faturamentoHoje = faturamentoMap[maquina.id] || 0;
+  (total, p) => total + Number(p.valor),
+  0
+);
         // 60 segundos sem acesso máquina já fica offline
         if (maquina.ultimaRequisicao) {
           var status = (tempoOffline(new Date(maquina.ultimaRequisicao))) > 60 ? "OFFLINE" : "ONLINE";
@@ -2289,6 +2362,7 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
             ultimoPagamentoRecebido: maquina.ultimoPagamentoRecebido,
             ultimaRequisicao: maquina.ultimaRequisicao,
             status: status,
+            faturamentoHoje: faturamentoHoje,
             pulso: maquina.valorDoPulso,
             nivelDeSinal: maquina.nivelDeSinal,
             bonusAtivo: maquina.bonusAtivo,
@@ -2309,6 +2383,7 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
             ultimoPagamentoRecebido: maquina.ultimoPagamentoRecebido,
             ultimaRequisicao: maquina.ultimaRequisicao,
             status: "OFFLINE",
+            faturamentoHoje: faturamentoHoje,
             pulso: maquina.valorDoPulso,
             nivelDeSinal: maquina.nivelDeSinal,
             bonusAtivo: maquina.bonusAtivo,
