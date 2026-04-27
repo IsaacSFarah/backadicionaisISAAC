@@ -2284,17 +2284,17 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
 
     // 🔥 1 QUERY (pagamentos do dia)
     const pagamentosHoje = await prisma.pix_Pagamento.findMany({
-      where: {
-        data: {
-          gte: hoje,
-        },
-        removido: false,
-      },
-      select: {
-        maquinaId: true,
-        valor: true,
-      },
-    });
+  where: {
+    data: {
+      gte: inicioDia, // 🔥 CORRIGIDO
+    },
+    removido: false,
+  },
+  select: {
+    maquinaId: true,
+    valor: true,
+  },
+});
 
     // 🔥 soma manual (valor é string)
     const faturamentoMap: Record<string, number> = {};
