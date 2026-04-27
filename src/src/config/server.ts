@@ -2280,24 +2280,28 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
 
     // 🔥 início do dia (LOCAL - mais seguro pro seu caso)
     const inicioDia = new Date();
-    inicioDia.setHours(0, 0, 0, 0);
+inicioDia.setHours(0, 0, 0, 0);
+
+const fimDia = new Date();
+fimDia.setHours(23, 59, 59, 999);
 
     // 🔥 BUSCA SOMENTE HOJE
     const pagamentosHoje = await prisma.pix_Pagamento.findMany({
-      where: {
-        data: {
-          gte: inicioDia,
-        },
-        OR: [
-          { removido: false },
-          { removido: null }
-        ]
-      },
-      select: {
-        maquinaId: true,
-        valor: true,
-      },
-    });
+  where: {
+    data: {
+      gte: inicioDia,
+      lte: fimDia,
+    },
+    OR: [
+      { removido: false },
+      { removido: null }
+    ]
+  },
+  select: {
+    maquinaId: true,
+    valor: true,
+  },
+});
 
     // 🔥 soma correta (corrigido milhar + vírgula)
     const faturamentoMap: Record<string, number> = {};
