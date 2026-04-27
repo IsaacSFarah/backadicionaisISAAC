@@ -2252,7 +2252,13 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
   const userId = req.userId;
 
   try {
-    const agora = Date.now();
+   const agora = new Date();
+
+// força horário BR (UTC-3)
+agora.setHours(agora.getHours() - 3);
+
+const inicioDia = new Date(agora);
+inicioDia.setHours(0, 0, 0, 0);
 
     // 🔥 CACHE 5 MIN
     if (cache[userId] && (agora - cacheTime[userId]) < 300000) {
