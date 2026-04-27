@@ -2246,7 +2246,7 @@ app.post("/login-cliente", async (req, res) => {
 
 //maquinas exibir as máquinas de um cliente logado
 app.get("/maquinas", verifyJWT, async (req: any, res) => {
-  console.log(`${req.userId} acessou a rota que busca todos as máquinas.`);
+  console.log(`${req.userId} acessou a rota que busca todas as máquinas.`);
 
   try {
     const maquinas = await prisma.pix_Maquina.findMany({
@@ -2259,31 +2259,34 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
     });
 
     if (maquinas.length === 0) {
-  return res.status(200).json([]);
-   }
+      return res.status(200).json([]);
+    }
 
+    // 🔥 início do dia
     const hoje = new Date();
     hoje.setHours(0, 0, 0, 0);
 
-    // 🔥 1 query só
+    // 🔥 1 QUERY (faturamento do dia)
     const faturamentoPorMaquina = await prisma.pix_Pagamento.groupBy({
       by: ["maquinaId"],
       where: {
-        createdAt: {
+        data: { // ✅ campo correto
           gte: hoje,
         },
+        removido: false, // 🔥 opcional mas recomendado
       },
       _sum: {
-        valor: true,
+        valor: true, // ⚠️ é string → vamos converter depois
       },
     });
 
     // 🔥 transforma em mapa rápido
-    const faturamentoMap: Record<number, number> = {};
+    const faturamentoMap: Record<string, number> = {};
 
-faturamentoPorMaquina.forEach((f) => {
-  faturamentoMap[f.maquinaId] = Number(f._sum.valor || 0);
-});
+    faturamentoPorMaquina.forEach((f) => {
+      faturamentoMap[f.maquinaId] = Number(f._sum?.valor || 0);
+    });
+
     const maquinasComStatus = [];
 
     for (const maquina of maquinas) {
@@ -2320,7 +2323,7 @@ faturamentoPorMaquina.forEach((f) => {
         ultimoPagamentoRecebido: maquina.ultimoPagamentoRecebido,
         ultimaRequisicao: maquina.ultimaRequisicao,
         status,
-        faturamentoHoje, // ✅ agora vindo otimizado
+        faturamentoHoje, // 💰 valor do dia
         pulso: maquina.valorDoPulso,
         nivelDeSinal: maquina.nivelDeSinal,
         bonusAtivo: maquina.bonusAtivo,
@@ -2329,12 +2332,12 @@ faturamentoPorMaquina.forEach((f) => {
     }
 
     return res.status(200).json(maquinasComStatus);
+
   } catch (err: any) {
-    console.log(err);
+    console.error(err);
     return res.status(500).json({ retorno: "ERRO" });
   }
 });
-
 
 
 app.get("/maquinas-adm", verifyJwtPessoa, async (req: any, res) => {
