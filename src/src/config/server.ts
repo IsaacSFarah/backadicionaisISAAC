@@ -777,6 +777,8 @@ app.post("/rota-recebimento-mercado-pago", async (req: any, res: any) => {
         ultimoPagamentoRecebido: new Date()
       }
     });
+    delete cache[maquina.clienteId];
+delete cacheTime[maquina.clienteId];
 
     valorDoPixMaquina01 = response.data.transaction_amount;
     valordoPixPlaquinhaPixMP = response.data.transaction_amount;
@@ -2245,6 +2247,7 @@ app.post("/login-cliente", async (req, res) => {
 
 
 //maquinas exibir as máquinas de um cliente logado
+// 🔥 CACHE GLOBAL
 const cache: Record<string, any> = {};
 const cacheTime: Record<string, number> = {};
 
@@ -2254,18 +2257,25 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
   try {
     const agora = Date.now();
 
-    // 🔥 cache 5 min
+    // 🔥 CACHE 5 MIN
     if (cache[userId] && (agora - cacheTime[userId]) < 300000) {
-      return res.json(cache[userId]);
+      console.log("⚡ usando cache");
+      return res.status(200).json(cache[userId]);
     }
 
+    console.log("🔄 buscando do banco");
+
+    // 🔥 BUSCA MÁQUINAS
     const maquinas = await prisma.pix_Maquina.findMany({
-      where: { clienteId: userId }
+      where: { clienteId: userId },
+      orderBy: { dataInclusao: "asc" }
     });
 
-    if (!maquinas.length) return res.json([]);
+    if (!maquinas.length) {
+      return res.status(200).json([]);
+    }
 
-    // 🔥 pega TODOS pagamentos (sem filtro de data)
+    // 🔥 BUSCA PAGAMENTOS
     const pagamentos = await prisma.pix_Pagamento.findMany({
       select: {
         maquinaId: true,
@@ -2274,40 +2284,80 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
       }
     });
 
-    const hoje = new Date();
-    hoje.setHours(0, 0, 0, 0);
+    // 🔥 DATA HOJE (STRING)
+    const hojeStr = new Date().toISOString().slice(0, 10);
 
+    // 🔥 MAPA DE FATURAMENTO
     const faturamentoMap: Record<string, number> = {};
 
-    pagamentos.forEach((p: any) => {
-      const dataPagamento = new Date(p.data);
+    const hojeStr = new Date().toISOString().slice(0, 10);
 
-      // 🔥 filtra manualmente (muito mais confiável)
-      if (dataPagamento >= hoje) {
+const faturamentoMap: Record<string, number> = {};
 
-        const valor = Number(
-          String(p.valor || "0")
-            .replace(/\./g, "")
-            .replace(",", ".")
-        );
+pagamentos.forEach((p: any) => {
+  const dataStr = new Date(p.data).toISOString().slice(0, 10);
 
-        if (!faturamentoMap[p.maquinaId]) {
-          faturamentoMap[p.maquinaId] = 0;
+  if (dataStr === hojeStr) {
+    const valor = Number(
+      String(p.valor || "0")
+        .replace(/\./g, "")
+        .replace(",", ".")
+    );
+
+    if (!faturamentoMap[p.maquinaId]) {
+      faturamentoMap[p.maquinaId] = 0;
+    }
+
+    faturamentoMap[p.maquinaId] += valor;
+  }
+});
+
+    // 🔥 MONTA RESPOSTA
+    const maquinasComStatus = maquinas.map((maquina) => {
+      let status = "OFFLINE";
+
+      if (maquina.ultimaRequisicao) {
+        status =
+          tempoOffline(new Date(maquina.ultimaRequisicao)) > 60
+            ? "OFFLINE"
+            : "ONLINE";
+
+        if (
+          status === "ONLINE" &&
+          maquina.ultimoPagamentoRecebido &&
+          tempoOffline(new Date(maquina.ultimoPagamentoRecebido)) < 1800
+        ) {
+          status = "PAGAMENTO_RECENTE";
         }
-
-        faturamentoMap[p.maquinaId] += valor;
       }
+
+      return {
+        id: maquina.id,
+        nome: maquina.nome,
+        status,
+        faturamentoHoje: faturamentoMap[maquina.id] || 0,
+        maquinaId: maquina.maquininha_serial,
+        pessoaId: maquina.pessoaId,
+        clienteId: maquina.clienteId,
+        descricao: maquina.descricao,
+        estoque: maquina.estoque,
+        store_id: maquina.store_id,
+        valorDoPix: maquina.valorDoPix,
+        dataInclusao: maquina.dataInclusao,
+        ultimoPagamentoRecebido: maquina.ultimoPagamentoRecebido,
+        ultimaRequisicao: maquina.ultimaRequisicao,
+        pulso: maquina.valorDoPulso,
+        nivelDeSinal: maquina.nivelDeSinal,
+        bonusAtivo: maquina.bonusAtivo,
+        bonusRegras: maquina.bonusRegras,
+      };
     });
 
-    const resultado = maquinas.map((m) => ({
-      ...m,
-      faturamentoHoje: faturamentoMap[m.id] || 0
-    }));
-
-    cache[userId] = resultado;
+    // 🔥 SALVA CACHE
+    cache[userId] = maquinasComStatus;
     cacheTime[userId] = agora;
 
-    return res.json(resultado);
+    return res.status(200).json(maquinasComStatus);
 
   } catch (err) {
     console.error(err);
@@ -3401,6 +3451,8 @@ if (valor >= 250) {
         estornado: false
       }
     });
+    
+    
     pagamentoProcessado = true;
     console.log(`
 💰 PAGAMENTO APROVADO
