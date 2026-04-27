@@ -2279,8 +2279,11 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
     }
 
     // 🔥 início do dia (UTC correto)
-const inicioDia = new Date();
-inicioDia.setUTCHours(0, 0, 0, 0);
+const inicioDia = new Date(Date.UTC(
+  new Date().getUTCFullYear(),
+  new Date().getUTCMonth(),
+  new Date().getUTCDate()
+));
 
 // 🔥 query
 const pagamentosHoje = await prisma.pix_Pagamento.findMany({
