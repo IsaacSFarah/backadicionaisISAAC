@@ -2245,23 +2245,20 @@ app.post("/login-cliente", async (req, res) => {
 
 
 //maquinas exibir as máquinas de um cliente logado
-// 🔥 CACHE POR CLIENTE
 const cache: Record<string, any> = {};
 const cacheTime: Record<string, number> = {};
 
 app.get("/maquinas", verifyJWT, async (req: any, res) => {
   const userId = req.userId;
 
-  console.log(`${userId} acessou máquinas`);
-
   try {
     const agora = Date.now();
 
     // 🔥 CACHE 5 MIN
-if (cache[userId] && (agora - cacheTime[userId]) < 300000) {
-  console.log("⚡ usando cache");
-  return res.status(200).json(cache[userId]);
-}
+    if (cache[userId] && (agora - cacheTime[userId]) < 300000) {
+      console.log("⚡ usando cache");
+      return res.status(200).json(cache[userId]);
+    }
 
     console.log("🔄 buscando do banco");
 
@@ -2278,40 +2275,24 @@ if (cache[userId] && (agora - cacheTime[userId]) < 300000) {
       return res.status(200).json([]);
     }
 
-    // 🔥 início do dia (LOCAL - mais seguro pro seu caso)
+    // 🔥 INÍCIO DO DIA (LOCAL - BR)
     const inicioDia = new Date();
-inicioDia.setHours(0, 0, 0, 0);
+    inicioDia.setHours(0, 0, 0, 0);
 
-const fimDia = new Date();
-fimDia.setHours(23, 59, 59, 999);
-
-    // 🔥 BUSCA SOMENTE HOJE
+    // 🔥 BUSCA APENAS PAGAMENTOS DE HOJE
     const pagamentosHoje = await prisma.pix_Pagamento.findMany({
-  where: {
-    data: {
-      gte: inicioDia,
-      lte: fimDia,
-    },
-    OR: [
-      { removido: false },
-      { removido: null }
-    ]
-  },
-  select: {
-    maquinaId: true,
-    valor: true,
-  },
-});
+      where: {
+        data: { // ⚠️ IMPORTANTE: no seu schema é "data", NÃO "createdAt"
+          gte: inicioDia,
+        },
+      },
+    });
 
-    // 🔥 soma correta (corrigido milhar + vírgula)
+    // 🔥 MONTA MAPA
     const faturamentoMap: Record<string, number> = {};
 
-    pagamentosHoje.forEach((p) => {
-      const valor = Number(
-        (p.valor || "0")
-          .replace(/\./g, "") // remove milhar
-          .replace(",", ".")  // decimal correto
-      );
+    pagamentosHoje.forEach((p: any) => {
+      const valor = Number(String(p.valor || "0").replace(",", "."));
 
       if (!faturamentoMap[p.maquinaId]) {
         faturamentoMap[p.maquinaId] = 0;
@@ -2344,19 +2325,19 @@ fimDia.setHours(23, 59, 59, 999);
 
       maquinasComStatus.push({
         id: maquina.id,
+        nome: maquina.nome,
+        status,
+        faturamentoHoje,
+        maquinaId: maquina.maquininha_serial,
         pessoaId: maquina.pessoaId,
         clienteId: maquina.clienteId,
-        nome: maquina.nome,
         descricao: maquina.descricao,
         estoque: maquina.estoque,
         store_id: maquina.store_id,
-        maquininha_serial: maquina.maquininha_serial,
         valorDoPix: maquina.valorDoPix,
         dataInclusao: maquina.dataInclusao,
         ultimoPagamentoRecebido: maquina.ultimoPagamentoRecebido,
         ultimaRequisicao: maquina.ultimaRequisicao,
-        status,
-        faturamentoHoje,
         pulso: maquina.valorDoPulso,
         nivelDeSinal: maquina.nivelDeSinal,
         bonusAtivo: maquina.bonusAtivo,
@@ -2364,7 +2345,7 @@ fimDia.setHours(23, 59, 59, 999);
       });
     }
 
-    // 🔥 salva cache
+    // 🔥 SALVA CACHE
     cache[userId] = maquinasComStatus;
     cacheTime[userId] = agora;
 
