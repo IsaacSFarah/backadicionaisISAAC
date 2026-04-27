@@ -2288,9 +2288,7 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
     const hojeStr = new Date().toISOString().slice(0, 10);
 
     // 🔥 MAPA DE FATURAMENTO
-    const faturamentoMap: Record<string, number> = {};
 
-    const hojeStr = new Date().toISOString().slice(0, 10);
 
 const faturamentoMap: Record<string, number> = {};
 
