@@ -2257,11 +2257,11 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
   try {
     const agora = Date.now();
 
-    // 🔥 CACHE 30 MIN
-    if (cache[userId] && (agora - cacheTime[userId]) < 1800000) {
-      console.log("⚡ usando cache");
-      return res.status(200).json(cache[userId]);
-    }
+    // 🔥 CACHE 5 MIN
+if (cache[userId] && (agora - cacheTime[userId]) < 300000) {
+  console.log("⚡ usando cache");
+  return res.status(200).json(cache[userId]);
+}
 
     console.log("🔄 buscando do banco");
 
