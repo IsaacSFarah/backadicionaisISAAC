@@ -2278,17 +2278,20 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
       return res.status(200).json([]);
     }
 
-    // 🔥 início do dia
-    const hoje = new Date();
-    hoje.setHours(0, 0, 0, 0);
+    // 🔥 início do dia (UTC correto)
+const inicioDia = new Date();
+inicioDia.setUTCHours(0, 0, 0, 0);
 
-    // 🔥 1 QUERY (pagamentos do dia)
-    const pagamentosHoje = await prisma.pix_Pagamento.findMany({
+// 🔥 query
+const pagamentosHoje = await prisma.pix_Pagamento.findMany({
   where: {
     data: {
-      gte: inicioDia, // 🔥 CORRIGIDO
+      gte: inicioDia,
     },
-    removido: false,
+    OR: [
+      { removido: false },
+      { removido: null }
+    ]
   },
   select: {
     maquinaId: true,
