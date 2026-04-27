@@ -2252,13 +2252,7 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
   const userId = req.userId;
 
   try {
-   const agora = new Date();
-
-// força horário BR (UTC-3)
-agora.setHours(agora.getHours() - 3);
-
-const inicioDia = new Date(agora);
-inicioDia.setHours(0, 0, 0, 0);
+    const agora = Date.now(); // ✅ número correto
 
     // 🔥 CACHE 5 MIN
     if (cache[userId] && (agora - cacheTime[userId]) < 300000) {
@@ -2269,36 +2263,38 @@ inicioDia.setHours(0, 0, 0, 0);
     console.log("🔄 buscando do banco");
 
     const maquinas = await prisma.pix_Maquina.findMany({
-      where: {
-        clienteId: userId,
-      },
-      orderBy: {
-        dataInclusao: "asc",
-      },
+      where: { clienteId: userId },
+      orderBy: { dataInclusao: "asc" },
     });
 
     if (maquinas.length === 0) {
       return res.status(200).json([]);
     }
 
-    // 🔥 INÍCIO DO DIA (LOCAL - BR)
+    // 🔥 início do dia (BR)
     const inicioDia = new Date();
     inicioDia.setHours(0, 0, 0, 0);
 
-    // 🔥 BUSCA APENAS PAGAMENTOS DE HOJE
+    // 🔥 pagamentos do dia
     const pagamentosHoje = await prisma.pix_Pagamento.findMany({
       where: {
-        data: { // ⚠️ IMPORTANTE: no seu schema é "data", NÃO "createdAt"
-          gte: inicioDia,
-        },
+        data: { gte: inicioDia },
+      },
+      select: {
+        maquinaId: true,
+        valor: true,
       },
     });
 
-    // 🔥 MONTA MAPA
+    // 🔥 soma correta (com milhar)
     const faturamentoMap: Record<string, number> = {};
 
     pagamentosHoje.forEach((p: any) => {
-      const valor = Number(String(p.valor || "0").replace(",", "."));
+      const valor = Number(
+        String(p.valor || "0")
+          .replace(/\./g, "") // remove milhar
+          .replace(",", ".")  // decimal
+      );
 
       if (!faturamentoMap[p.maquinaId]) {
         faturamentoMap[p.maquinaId] = 0;
@@ -2307,11 +2303,7 @@ inicioDia.setHours(0, 0, 0, 0);
       faturamentoMap[p.maquinaId] += valor;
     });
 
-    const maquinasComStatus = [];
-
-    for (const maquina of maquinas) {
-      const faturamentoHoje = faturamentoMap[maquina.id] || 0;
-
+    const maquinasComStatus = maquinas.map((maquina) => {
       let status = "OFFLINE";
 
       if (maquina.ultimaRequisicao) {
@@ -2329,11 +2321,11 @@ inicioDia.setHours(0, 0, 0, 0);
         }
       }
 
-      maquinasComStatus.push({
+      return {
         id: maquina.id,
         nome: maquina.nome,
         status,
-        faturamentoHoje,
+        faturamentoHoje: faturamentoMap[maquina.id] || 0,
         maquinaId: maquina.maquininha_serial,
         pessoaId: maquina.pessoaId,
         clienteId: maquina.clienteId,
@@ -2348,10 +2340,10 @@ inicioDia.setHours(0, 0, 0, 0);
         nivelDeSinal: maquina.nivelDeSinal,
         bonusAtivo: maquina.bonusAtivo,
         bonusRegras: maquina.bonusRegras,
-      });
-    }
+      };
+    });
 
-    // 🔥 SALVA CACHE
+    // 🔥 salva cache
     cache[userId] = maquinasComStatus;
     cacheTime[userId] = agora;
 
