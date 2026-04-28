@@ -1878,9 +1878,10 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
 
       // 🔧 NORMALIZAÇÃO
       const metodoPagamento = (maquina.metodoPagamento || "PIX").toUpperCase();
-      const metodosPermitidos = (maquina.bonusMetodos || []).map((m: string) =>
-        m.toUpperCase()
-      );
+
+const metodosPermitidos = Array.isArray(maquina.bonusMetodos)
+  ? maquina.bonusMetodos.map((m: any) => String(m).toUpperCase())
+  : [];
 
       // 🔄 FUNÇÃO PRA EVITAR REPETIÇÃO
       const atualizarMaquina = async () => {
