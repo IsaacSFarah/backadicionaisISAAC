@@ -2292,6 +2292,8 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
     const startSP = new Date(Date.UTC(nowSP.getUTCFullYear(), nowSP.getUTCMonth(), nowSP.getUTCDate(), 0, 0, 0));
     const startUTC = new Date(startSP.getTime() - offsetMinutes * 60_000);
     const endUTC = new Date(startUTC.getTime() + 24 * 60 * 60 * 1000);
+    const startUTCOntem = new Date(startUTC.getTime() - 24 * 60 * 60 * 1000);
+    const endUTCOntem = startUTC;
 
     const pagamentosHoje = await prisma.pix_Pagamento.findMany({
       where: {
@@ -2324,6 +2326,37 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
       faturamentoMap[p.maquinaId] += valor;
     });
 
+    const pagamentosOntem = await prisma.pix_Pagamento.findMany({
+      where: {
+        maquinaId: { in: maquinaIds },
+        estornado: false,
+        data: {
+          gte: startUTCOntem,
+          lt: endUTCOntem,
+        },
+      },
+      select: {
+        maquinaId: true,
+        valor: true,
+      },
+    });
+
+    const faturamentoOntemMap: Record<string, number> = {};
+
+    pagamentosOntem.forEach((p: any) => {
+      const valor = Number(
+        String(p.valor || "0")
+          .replace(/\./g, "")
+          .replace(",", ".")
+      );
+
+      if (!faturamentoOntemMap[p.maquinaId]) {
+        faturamentoOntemMap[p.maquinaId] = 0;
+      }
+
+      faturamentoOntemMap[p.maquinaId] += valor;
+    });
+
     // 🔥 MONTA RESPOSTA
     const maquinasComStatus = maquinas.map((maquina) => {
       let status = "OFFLINE";
@@ -2348,6 +2381,7 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
         nome: maquina.nome,
         status,
         faturamentoHoje: faturamentoMap[maquina.id] || 0,
+        faturamentoOntem: faturamentoOntemMap[maquina.id] || 0,
         maquinaId: maquina.maquininha_serial,
         pessoaId: maquina.pessoaId,
         clienteId: maquina.clienteId,
