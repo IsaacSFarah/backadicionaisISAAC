@@ -7623,13 +7623,17 @@ app.post("/gerar-link", verifyJWT, async (req: any, res) => {
 
     const { maquinaId, valor } = req.body;
 
+    // Se valor não vier, usa o valor padrão da máquina ou 1.00
+    let valorFinal = valor ? parseFloat(valor) : 1.0;
+    if (isNaN(valorFinal)) valorFinal = 1.0;
+
     const id = gerarNumeroAleatorio();
 
     await prisma.pix_Link.create({
       data: {
         id,
-        maquinaId,
-        valor: parseFloat(valor),
+        maquina: { connect: { id: maquinaId } },
+        valor: valorFinal,
         usado: false
       }
     });
