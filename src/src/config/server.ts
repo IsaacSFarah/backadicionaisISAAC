@@ -4002,15 +4002,30 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
 
       console.log(`recebendo pagamento na máquina: ${maquina.nome}`);
 
-      // 🔥 ATUALIZA A MÁQUINA (ESSENCIAL)
-      await prisma.pix_Maquina.update({
-        where: { id: maquina.id },
-        data: {
-          valorDoPix: String(value),
-          metodoPagamento: "ESPECIE", // 👈 ESSA LINHA FAZ TUDO FUNCIONAR
-          ultimoPagamentoRecebido: new Date()
-        }
-      });
+      const metodosPermitidos = Array.isArray((maquina as any)?.bonusMetodos)
+        ? (maquina as any).bonusMetodos.map((m: any) => String(m).toUpperCase())
+        : [];
+
+      const podeLiberarEspecie =
+        maquina.bonusAtivo === true && metodosPermitidos.includes("ESPECIE");
+
+      if (podeLiberarEspecie) {
+        await prisma.pix_Maquina.update({
+          where: { id: maquina.id },
+          data: {
+            valorDoPix: String(value),
+            metodoPagamento: "ESPECIE",
+            ultimoPagamentoRecebido: new Date(),
+          },
+        });
+      } else {
+        await prisma.pix_Maquina.update({
+          where: { id: maquina.id },
+          data: {
+            ultimoPagamentoRecebido: new Date(),
+          },
+        });
+      }
 
       // 🔥 REGISTRO (MANTIDO)
       const novoPagamento = await prisma.pix_Pagamento.create({
