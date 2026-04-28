@@ -197,29 +197,38 @@ function calcularPulsosDinamicos(
   valorPorPulso: number = 1.0,
   maquina: any,
   metodoPagamento?: string
-): { pulsos: string, bonus: number } {
+): { pulsos: string; bonus: number } {
+
+  const metodo = (metodoPagamento || "PIX").toUpperCase();
 
   let pulsosBase = Math.floor(valorPix / valorPorPulso);
   let bonusExtra = 0;
 
+  // 🔒 normaliza métodos permitidos
+  const metodosPermitidos = Array.isArray(maquina?.bonusMetodos)
+    ? maquina.bonusMetodos.map((m: any) => String(m).toUpperCase())
+    : [];
+
+  // 🎯 regra final do bônus
   const podeAplicarBonus =
-  maquina &&
-  maquina.bonusAtivo &&
-  metodoPagamento !== "REMOTO" &&
-  Array.isArray(maquina.bonusMetodos) &&
-  metodoPagamento &&
-  maquina.bonusMetodos.includes(metodoPagamento);
+    maquina?.bonusAtivo === true &&
+    metodo !== "REMOTO" &&
+    metodosPermitidos.includes(metodo);
 
   if (podeAplicarBonus) {
-    const regras = maquina.bonusRegras || [];
 
-    const regrasOrdenadas = Array.isArray(regras)
-      ? [...regras].sort((a: any, b: any) => b.valorMinimo - a.valorMinimo)
+    const regras = Array.isArray(maquina?.bonusRegras)
+      ? maquina.bonusRegras
       : [];
 
+    // ordena da maior regra para menor
+    const regrasOrdenadas = [...regras].sort(
+      (a: any, b: any) => Number(b.valorMinimo) - Number(a.valorMinimo)
+    );
+
     for (const regra of regrasOrdenadas) {
-      if (valorPix >= regra.valorMinimo) {
-        bonusExtra = regra.bonus;
+      if (valorPix >= Number(regra.valorMinimo)) {
+        bonusExtra = Number(regra.bonus) || 0;
         break;
       }
     }
@@ -228,8 +237,8 @@ function calcularPulsosDinamicos(
   const total = pulsosBase + bonusExtra;
 
   return {
-    pulsos: ("0000" + total).slice(-4),
-    bonus: bonusExtra
+    pulsos: String(total).padStart(4, "0"),
+    bonus: bonusExtra,
   };
 }
 
@@ -1833,29 +1842,36 @@ app.get("/consultar-maquina/:id", async (req: any, res) => {
 
 app.get("/consultar-maquina/:id", async (req: any, res: any) => {
   try {
-    const maquinaId = req.params.id;
-    const ip = req.ip;
 
-    // ⏰ Ajuste de horário
+    const maquinaId = req.params.id;
+
+    const ip = req.ip; // Pegando o IP da requisição
+
+    // Cria uma nova data e subtrai 3 horas
     const dataAtual = new Date();
     dataAtual.setHours(dataAtual.getHours() - 3);
+
+    // Converte a data ajustada para o formato ISO e passa para a função intervalo
     const intervaloAtual: string = intervalo(dataAtual.toISOString());
 
+
+    // Obtém a data atual, ajustando para começar à meia-noite
     const inicioDiaAtual = new Date();
     inicioDiaAtual.setHours(0, 0, 0, 0);
 
-    // 📊 Monitoramento
+    // Verifica se já existe um registro de monitoramento para a máquina e intervalo no dia atual
     const ultimaRequisicao = await prisma.monitoramento.findFirst({
       where: {
         maquinaId: maquinaId,
         intervalo: intervaloAtual,
         dataHoraRequisicao: {
-          gte: inicioDiaAtual,
+          gte: inicioDiaAtual, // Filtra apenas registros do dia atual
         },
       },
     });
 
     if (!ultimaRequisicao) {
+      // Se não houver um registro para o intervalo atual, insere um novo
       await prisma.monitoramento.create({
         data: {
           maquinaId: maquinaId,
@@ -1865,126 +1881,103 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
       });
     }
 
-    // 📶 Sinal
+    // 📶 PEGANDO SINAL DA ESP (CORRETO)
     const nivelDeSinal = req.query.nivelDeSinal;
 
     const maquina = await prisma.pix_Maquina.findUnique({
-      where: { id: maquinaId },
+      where: {
+        id: maquinaId,
+      },
     });
 
     let pulsosFormatados = "0000";
 
     if (maquina) {
 
-      // 🔧 NORMALIZAÇÃO
-      const metodoPagamento = (maquina.metodoPagamento || "PIX").toUpperCase();
+      // 🔢 CONVERTE PIX EM PULSOS COM LÓGICA DE BÔNUS DINÂMICO DA MÁQUINA
+      
 
-const metodosPermitidos = Array.isArray(maquina.bonusMetodos)
-  ? maquina.bonusMetodos.map((m: any) => String(m).toUpperCase())
-  : [];
+const metodoPagamento = maquina.metodoPagamento || "PIX";
 
-      // 🔄 FUNÇÃO PRA EVITAR REPETIÇÃO
-      const atualizarMaquina = async () => {
-        await prisma.pix_Maquina.update({
-          where: { id: maquinaId },
-          data: {
-            valorDoPix: "0",
-            ultimaRequisicao: new Date(),
-            nivelDeSinal:
-              nivelDeSinal !== undefined
-                ? parseInt(nivelDeSinal)
-                : null,
-          },
-        });
-      };
-
-      // 🚫 BLOQUEIO TOTAL
-      if (!maquina.bonusAtivo) {
-        console.log(`
-🚫 BLOQUEADO TOTAL
-🏪 Máquina: ${maquina.nome}
-❌ Bônus desativado
-        `);
-
-        await atualizarMaquina();
-        return res.status(200).json({ retorno: "0000" });
-      }
-
-      // 🚫 BLOQUEIO POR MÉTODO
-      if (!metodosPermitidos.includes(metodoPagamento)) {
-        console.log(`
-🚫 BLOQUEADO POR MÉTODO
-🏪 Máquina: ${maquina.nome}
-💳 Método: ${metodoPagamento}
-❌ Não autorizado
-        `);
-
-        await atualizarMaquina();
-        return res.status(200).json({ retorno: "0000" });
-      }
-
-      // ✅ LIBERA NORMAL
-      const resultadoCalculo = calcularPulsosDinamicos(
-        parseFloat(maquina.valorDoPix || "0"),
-        parseFloat(maquina.valorDoPulso || "1"),
-        maquina,
-        metodoPagamento
-      );
+const resultadoCalculo = calcularPulsosDinamicos(
+  parseFloat(maquina.valorDoPix || "0"),
+  parseFloat(maquina.valorDoPulso || "1"),
+  maquina,
+  metodoPagamento
+);
 
       pulsosFormatados = resultadoCalculo.pulsos;
 
-      // 🎁 REGISTRA BÔNUS
+      // Atualiza o registro do pagamento com o bônus liberado se for maior que zero
       if (resultadoCalculo.bonus > 0) {
         try {
+          // Busca o último pagamento pendente desta máquina para registrar o bônus
           const ultimoPagamento = await prisma.pix_Pagamento.findFirst({
             where: {
               maquinaId: maquinaId,
-              valorBonus: 0,
+              valorBonus: 0
             },
-            orderBy: { data: "desc" },
+            orderBy: { data: 'desc' }
           });
 
           if (ultimoPagamento) {
             await prisma.pix_Pagamento.update({
               where: { id: ultimoPagamento.id },
-              data: { valorBonus: resultadoCalculo.bonus },
+              data: { valorBonus: resultadoCalculo.bonus }
             });
           }
         } catch (error) {
-          console.error("Erro ao registrar bônus:", error);
+          console.error("Erro ao registrar bônus no pagamento:", error);
         }
       }
 
-      // 🔥 LOG
+      // 🔥 LOG (opcional, ajuda debug)
       if (parseFloat(maquina.valorDoPix) > 0) {
         console.log(`
-🚀 CRÉDITO LIBERADO
-🏪 Máquina: ${maquina.nome}
-💳 Método: ${metodoPagamento}
+🚀 CRÉDITO CONSUMIDO
+🏪 Máquina: ${maquina.nome} (${maquina.id})
 💰 Valor: ${maquina.valorDoPix}
-        `);
+📶 Sinal: ${nivelDeSinal}
+🕒 ${new Date().toISOString()}
+`);
       }
 
-      // 🔄 ATUALIZA
-      await atualizarMaquina();
+      // 🔥 ATUALIZA MÁQUINA
+      await prisma.pix_Maquina.update({
+        where: {
+          id: maquinaId,
+        },
+        data: {
+          valorDoPix: "0",
+          ultimaRequisicao: new Date(),
+
+          // 📶 SALVA SINAL (IGUAL AO SEU FUNCIONANDO)
+          nivelDeSinal: (nivelDeSinal != undefined)
+            ? parseInt(nivelDeSinal)
+            : null
+        },
+      });
 
     } else {
+
       console.log(`
 ❌ MÁQUINA NÃO ENCONTRADA
 🆔 ID: ${maquinaId}
 📶 Sinal: ${nivelDeSinal}
-      `);
+`);
+
     }
 
     return res.status(200).json({ retorno: pulsosFormatados });
 
   } catch (err: any) {
+
     console.log(`
 🔥 ERRO NA CONSULTA
 🆔 ID: ${req.params.id}
 📶 Sinal: ${req.query.nivelDeSinal}
 ❌ ${err.message}
-    `);
+`);
 
     return res.status(500).json({ retorno: "0000" });
   }
