@@ -1940,27 +1940,39 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
         return res.status(200).json({ retorno: "0000" });
       }
 
-      const metodoPagamento = String(maquina.metodoPagamento || "PIX").toUpperCase();
+      const maquinaAtual = await prisma.pix_Maquina.findUnique({
+        where: { id: maquinaId },
+      });
 
-      const resultadoCalculo = calcularPulsosDinamicos(
-        valorPixAtual,
-        valorPorPulso,
-        maquina,
-        metodoPagamento
-      );
+      const metodoPagamento = String(maquinaAtual?.metodoPagamento || "PIX").toUpperCase();
 
-      pulsosFormatados = resultadoCalculo.pulsos;
-
-      const metodosPermitidos = Array.isArray(maquina?.bonusMetodos)
-        ? maquina.bonusMetodos.map((m: any) => String(m).toUpperCase())
+      const metodosPermitidos = Array.isArray(maquinaAtual?.bonusMetodos)
+        ? (maquinaAtual as any).bonusMetodos.map((m: any) => String(m).toUpperCase())
         : [];
 
-      const podeRegistrarBonus =
-        maquina?.bonusAtivo === true &&
+      const bonusAtivo = maquinaAtual?.bonusAtivo === true;
+
+      const pulsosBase = Math.floor(valorPixAtual / valorPorPulso);
+      const pulsosBaseFormatado = String(pulsosBase).padStart(4, "0");
+
+      const podeAplicarBonus =
+        bonusAtivo &&
         metodoPagamento !== "REMOTO" &&
         metodosPermitidos.includes(metodoPagamento);
 
-      if (podeRegistrarBonus && resultadoCalculo.bonus > 0) {
+      let resultadoCalculo = { pulsos: pulsosBaseFormatado, bonus: 0 };
+      if (podeAplicarBonus) {
+        resultadoCalculo = calcularPulsosDinamicos(
+          valorPixAtual,
+          valorPorPulso,
+          maquinaAtual,
+          metodoPagamento
+        );
+      }
+
+      pulsosFormatados = resultadoCalculo.pulsos;
+
+      if (podeAplicarBonus && resultadoCalculo.bonus > 0) {
         try {
           const ultimoPagamento = await prisma.pix_Pagamento.findFirst({
             where: {
