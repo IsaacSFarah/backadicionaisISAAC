@@ -2284,40 +2284,45 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
       return res.status(200).json([]);
     }
 
-    // 🔥 BUSCA PAGAMENTOS
-    const pagamentos = await prisma.pix_Pagamento.findMany({
+    const maquinaIds = maquinas.map((m) => m.id);
+
+    const offsetMinutes = -180;
+    const now = new Date();
+    const nowSP = new Date(now.getTime() + offsetMinutes * 60_000);
+    const startSP = new Date(Date.UTC(nowSP.getUTCFullYear(), nowSP.getUTCMonth(), nowSP.getUTCDate(), 0, 0, 0));
+    const startUTC = new Date(startSP.getTime() - offsetMinutes * 60_000);
+    const endUTC = new Date(startUTC.getTime() + 24 * 60 * 60 * 1000);
+
+    const pagamentosHoje = await prisma.pix_Pagamento.findMany({
+      where: {
+        maquinaId: { in: maquinaIds },
+        estornado: false,
+        data: {
+          gte: startUTC,
+          lt: endUTC,
+        },
+      },
       select: {
         maquinaId: true,
         valor: true,
-        data: true
-      }
+      },
     });
 
-    // 🔥 DATA HOJE (STRING)
-    const hojeStr = new Date().toISOString().slice(0, 10);
+    const faturamentoMap: Record<string, number> = {};
 
-    // 🔥 MAPA DE FATURAMENTO
+    pagamentosHoje.forEach((p: any) => {
+      const valor = Number(
+        String(p.valor || "0")
+          .replace(/\./g, "")
+          .replace(",", ".")
+      );
 
+      if (!faturamentoMap[p.maquinaId]) {
+        faturamentoMap[p.maquinaId] = 0;
+      }
 
-const faturamentoMap: Record<string, number> = {};
-
-pagamentos.forEach((p: any) => {
-  const dataStr = new Date(p.data).toISOString().slice(0, 10);
-
-  if (dataStr === hojeStr) {
-    const valor = Number(
-      String(p.valor || "0")
-        .replace(/\./g, "")
-        .replace(",", ".")
-    );
-
-    if (!faturamentoMap[p.maquinaId]) {
-      faturamentoMap[p.maquinaId] = 0;
-    }
-
-    faturamentoMap[p.maquinaId] += valor;
-  }
-});
+      faturamentoMap[p.maquinaId] += valor;
+    });
 
     // 🔥 MONTA RESPOSTA
     const maquinasComStatus = maquinas.map((maquina) => {
