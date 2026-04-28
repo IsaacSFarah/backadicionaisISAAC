@@ -1957,6 +1957,7 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
 
       const podeAplicarBonus =
         bonusAtivo &&
+        metodoPagamento !== "ESPECIE" &&
         metodoPagamento !== "REMOTO" &&
         metodosPermitidos.includes(metodoPagamento);
 
@@ -4009,11 +4010,36 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
       const podeLiberarEspecie =
         maquina.bonusAtivo === true && metodosPermitidos.includes("ESPECIE");
 
+      let bonusExtra = 0;
+
       if (podeLiberarEspecie) {
+        const regras = Array.isArray((maquina as any)?.bonusRegras)
+          ? (maquina as any).bonusRegras
+          : [];
+
+        const regrasOrdenadas = [...regras].sort(
+          (a: any, b: any) => Number(b.valorMinimo) - Number(a.valorMinimo)
+        );
+
+        for (const regra of regrasOrdenadas) {
+          if (value >= Number(regra.valorMinimo)) {
+            bonusExtra = Number(regra.bonus) || 0;
+            break;
+          }
+        }
+
+        const valorPulso = parseFloat(maquina.valorDoPulso || "1");
+        const valorPulsoSeguro =
+          valorPulso && !Number.isNaN(valorPulso) && valorPulso > 0
+            ? valorPulso
+            : 1;
+
+        const valorParaLiberar = String(Math.max(0, bonusExtra) * valorPulsoSeguro);
+
         await prisma.pix_Maquina.update({
           where: { id: maquina.id },
           data: {
-            valorDoPix: String(value),
+            valorDoPix: valorParaLiberar,
             metodoPagamento: "ESPECIE",
             ultimoPagamentoRecebido: new Date(),
           },
@@ -4036,7 +4062,8 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
           motivoEstorno: ``,
           tipo: "CASH",
           estornado: false,
-          clienteId: maquina.clienteId
+          clienteId: maquina.clienteId,
+          valorBonus: podeLiberarEspecie ? bonusExtra : 0,
         },
       });
 
