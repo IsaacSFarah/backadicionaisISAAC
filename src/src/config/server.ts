@@ -1897,7 +1897,11 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
       // 🔢 CONVERTE PIX EM PULSOS COM LÓGICA DE BÔNUS DINÂMICO DA MÁQUINA
       
 
-const metodoPagamento = maquina.metodoPagamento || "PIX";
+const metodoPagamentoBase = maquina.metodoPagamento || "PIX";
+const metodoPagamento =
+  metodoPagamentoBase === "ESPECIE" && maquina.bonusAtivo !== true
+    ? "REMOTO"
+    : metodoPagamentoBase;
 
 const resultadoCalculo = calcularPulsosDinamicos(
   parseFloat(maquina.valorDoPix || "0"),
