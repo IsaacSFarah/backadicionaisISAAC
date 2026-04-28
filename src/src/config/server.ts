@@ -1897,37 +1897,83 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
       // 🔢 CONVERTE PIX EM PULSOS COM LÓGICA DE BÔNUS DINÂMICO DA MÁQUINA
       
 
-const metodoPagamentoBase = maquina.metodoPagamento || "PIX";
-const metodoPagamento =
-  metodoPagamentoBase === "ESPECIE" && maquina.bonusAtivo !== true
-    ? "REMOTO"
-    : metodoPagamentoBase;
+      const valorPixAtualStr = String(maquina.valorDoPix || "0");
+      const valorPixAtual = parseFloat(valorPixAtualStr);
+      const valorPorPulso = parseFloat(maquina.valorDoPulso || "1");
 
-const resultadoCalculo = calcularPulsosDinamicos(
-  parseFloat(maquina.valorDoPix || "0"),
-  parseFloat(maquina.valorDoPulso || "1"),
-  maquina,
-  metodoPagamento
-);
+      const sinalInt =
+        nivelDeSinal != undefined ? parseInt(String(nivelDeSinal)) : null;
+
+      const semCredito =
+        !valorPixAtual ||
+        Number.isNaN(valorPixAtual) ||
+        valorPixAtual <= 0 ||
+        !valorPorPulso ||
+        Number.isNaN(valorPorPulso) ||
+        valorPorPulso <= 0;
+
+      if (semCredito) {
+        await prisma.pix_Maquina.update({
+          where: { id: maquinaId },
+          data: {
+            ultimaRequisicao: new Date(),
+            nivelDeSinal: sinalInt,
+          },
+        });
+
+        return res.status(200).json({ retorno: "0000" });
+      }
+
+      const consumiuCredito = await prisma.pix_Maquina.updateMany({
+        where: {
+          id: maquinaId,
+          valorDoPix: valorPixAtualStr,
+        },
+        data: {
+          valorDoPix: "0",
+          ultimaRequisicao: new Date(),
+          nivelDeSinal: sinalInt,
+        },
+      });
+
+      if (consumiuCredito.count === 0) {
+        return res.status(200).json({ retorno: "0000" });
+      }
+
+      const metodoPagamento = String(maquina.metodoPagamento || "PIX").toUpperCase();
+
+      const resultadoCalculo = calcularPulsosDinamicos(
+        valorPixAtual,
+        valorPorPulso,
+        maquina,
+        metodoPagamento
+      );
 
       pulsosFormatados = resultadoCalculo.pulsos;
 
-      // Atualiza o registro do pagamento com o bônus liberado se for maior que zero
-      if (resultadoCalculo.bonus > 0) {
+      const metodosPermitidos = Array.isArray(maquina?.bonusMetodos)
+        ? maquina.bonusMetodos.map((m: any) => String(m).toUpperCase())
+        : [];
+
+      const podeRegistrarBonus =
+        maquina?.bonusAtivo === true &&
+        metodoPagamento !== "REMOTO" &&
+        metodosPermitidos.includes(metodoPagamento);
+
+      if (podeRegistrarBonus && resultadoCalculo.bonus > 0) {
         try {
-          // Busca o último pagamento pendente desta máquina para registrar o bônus
           const ultimoPagamento = await prisma.pix_Pagamento.findFirst({
             where: {
               maquinaId: maquinaId,
-              valorBonus: 0
+              valorBonus: 0,
             },
-            orderBy: { data: 'desc' }
+            orderBy: { data: "desc" },
           });
 
           if (ultimoPagamento) {
             await prisma.pix_Pagamento.update({
               where: { id: ultimoPagamento.id },
-              data: { valorBonus: resultadoCalculo.bonus }
+              data: { valorBonus: resultadoCalculo.bonus },
             });
           }
         } catch (error) {
@@ -1936,31 +1982,15 @@ const resultadoCalculo = calcularPulsosDinamicos(
       }
 
       // 🔥 LOG (opcional, ajuda debug)
-      if (parseFloat(maquina.valorDoPix) > 0) {
+      if (valorPixAtual > 0) {
         console.log(`
 🚀 CRÉDITO CONSUMIDO
 🏪 Máquina: ${maquina.nome} (${maquina.id})
-💰 Valor: ${maquina.valorDoPix}
+💰 Valor: ${valorPixAtualStr}
 📶 Sinal: ${nivelDeSinal}
 🕒 ${new Date().toISOString()}
 `);
       }
-
-      // 🔥 ATUALIZA MÁQUINA
-      await prisma.pix_Maquina.update({
-        where: {
-          id: maquinaId,
-        },
-        data: {
-          valorDoPix: "0",
-          ultimaRequisicao: new Date(),
-
-          // 📶 SALVA SINAL (IGUAL AO SEU FUNCIONANDO)
-          nivelDeSinal: (nivelDeSinal != undefined)
-            ? parseInt(nivelDeSinal)
-            : null
-        },
-      });
 
     } else {
 
