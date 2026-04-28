@@ -7632,7 +7632,7 @@ app.post("/gerar-link", verifyJWT, async (req: any, res) => {
     await prisma.pix_Link.create({
       data: {
         id,
-        maquina: { connect: { id: maquinaId } },
+        maquinaId,
         valor: valorFinal,
         usado: false
       }
