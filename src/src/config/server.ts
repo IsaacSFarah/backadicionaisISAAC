@@ -4205,6 +4205,7 @@ app.get("/pagamentos/:maquinaId", verifyJWT, async (req: any, res) => {
       "estornos": totalComEstorno,
       "cash": totalEspecie,
       "estoque": estoque,
+      "store_id": maquina.store_id,
       "pagamentos": pagamentos,
       "totalCash": valorCash,
       "totalPix": valorPix,
@@ -4288,7 +4289,7 @@ app.get("/pagamentos-adm/:maquinaId", verifyJwtPessoa, async (req: any, res) => 
 
     }
 
-    return res.status(200).json({ "total": totalSemEstorno, "estornos": totalComEstorno, "cash": totalEspecie, "estoque": estoque, "pagamentos": pagamentos });
+    return res.status(200).json({ "total": totalSemEstorno, "estornos": totalComEstorno, "cash": totalEspecie, "estoque": estoque, "store_id": maquina.store_id, "pagamentos": pagamentos });
   } catch (err: any) {
     console.log(err);
     return res.status(500).json({ "retorno": "ERRO" });
@@ -4386,6 +4387,12 @@ app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req: any, res) => {
       }
     });
 
+    const maquina = await prisma.pix_Maquina.findUnique({
+      where: {
+        id: req.params.maquinaId
+      }
+    });
+
     let totalSemEstorno = 0;
     let totalComEstorno = 0;
 
@@ -4446,6 +4453,7 @@ app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req: any, res) => {
       "total": totalSemEstorno,
       "estornos": totalComEstorno,
       "cash": totalEspecie,
+      "store_id": maquina?.store_id,
       "pagamentos": pagamentos,
       "totalCash": valorCash,
       "totalPix": valorPix,
@@ -4504,6 +4512,12 @@ app.post("/pagamentos-periodo-adm/:maquinaId", verifyJwtPessoa, async (req: any,
       }
     });
 
+    const maquina = await prisma.pix_Maquina.findUnique({
+      where: {
+        id: req.params.maquinaId
+      }
+    });
+
     let totalSemEstorno = 0;
     let totalComEstorno = 0;
 
@@ -4543,7 +4557,7 @@ app.post("/pagamentos-periodo-adm/:maquinaId", verifyJwtPessoa, async (req: any,
     //   totalEspecie += valor;
     // }
 
-    return res.status(200).json({ "total": totalSemEstorno, "estornos": totalComEstorno, "cash": totalEspecie, "pagamentos": pagamentos });
+    return res.status(200).json({ "total": totalSemEstorno, "estornos": totalComEstorno, "cash": totalEspecie, "store_id": maquina?.store_id, "pagamentos": pagamentos });
   } catch (err: any) {
     console.log(err);
     return res.status(500).json({ "retorno": "ERRO" });
