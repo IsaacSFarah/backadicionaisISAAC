@@ -3553,10 +3553,15 @@ if (valor >= 250) {
     // ================================
     // 11. SALVAR PAGAMENTO
     // ================================
+    let metodoPagamento = "PIX";
+    if (tipoPagamento === "credit_card") metodoPagamento = "CREDITO";
+    else if (tipoPagamento === "debit_card") metodoPagamento = "DEBITO";
+
     await prisma.pix_Maquina.update({
       where: { id: maquina.id },
       data: {
         valorDoPix: valor.toString(),
+        metodoPagamento: metodoPagamento,
         ultimoPagamentoRecebido: new Date()
       }
     });
