@@ -1917,6 +1917,7 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
       },
       select: {
         id: true,
+        clienteId: true,
         nome: true,
         valorDoPix: true,
         valorDoPulso: true,
@@ -2013,13 +2014,22 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
 
       pulsosFormatados = resultadoCalculo.pulsos;
 
-      console.log(
-        `ESP consumiu crédito | maquinaId=${maquinaId} nome=${maquina.nome} metodo=${metodoPagamento} valor=${valorPixAtual.toFixed(
-          2
-        )} pulso=${valorPorPulso} pulsos=${pulsosFormatados} bonus=${resultadoCalculo.bonus} ip=${ip} sinal=${
-          sinalInt ?? ""
-        }`
-      );
+      const valorCreditoTexto = Number.isFinite(valorPixAtual)
+        ? valorPixAtual.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })
+        : "";
+
+      console.log(`
+🎮 CRÉDITO CONSUMIDO (ESP)
+👤 ClienteId: ${(maquina as any).clienteId || ""}
+🏪 Máquina: ${maquina.nome} (${maquinaId})
+💳 Método: ${metodoPagamento}
+💵 Valor: ${valorCreditoTexto}
+🔢 Pulso: ${valorPorPulso}
+🧮 Pulsos: ${pulsosFormatados}
+🎁 Bônus: ${resultadoCalculo.bonus}
+🌐 IP: ${ip}
+📶 Sinal: ${sinalInt ?? ""}
+`);
 
       if (podeAplicarBonus && resultadoCalculo.bonus > 0) {
         try {
@@ -4041,7 +4051,14 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
 
     if (maquina) {
 
-      console.log(`recebendo pagamento na máquina: ${maquina.nome}`);
+      const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || "");
+      console.log(`
+💵 RECEBIMENTO EM ESPÉCIE
+👤 Cliente: ${maquina?.cliente?.nome || ""} (${maquina.clienteId})
+🏪 Máquina: ${maquina.nome} (${maquina.id})
+💵 Valor: ${Number.isFinite(value) ? value : ""}
+🌐 IP: ${ip}
+`);
 
       const metodosPermitidos = Array.isArray((maquina as any)?.bonusMetodos)
         ? (maquina as any).bonusMetodos.map((m: any) => String(m).toUpperCase())
@@ -4112,6 +4129,16 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
           valorBonus: podeLiberarEspecie && bonusExtra > 0 ? bonusExtra : 0,
         },
       });
+
+      console.log(`
+💰 PAGAMENTO REGISTRADO (ESPÉCIE)
+👤 Cliente: ${maquina?.cliente?.nome || ""} (${maquina.clienteId})
+🏪 Máquina: ${maquina.nome} (${maquina.id})
+💵 Valor: ${valorNotaTexto}
+🎁 Bônus em espécie: ${podeLiberarEspecie ? "SIM" : "NÃO"}
+🎯 Bônus extra: ${bonusExtra}
+📝 ${novoPagamento.motivoEstorno || ""}
+`);
 
       if (NOTIFICACOES_PAGAMENTOS_ESPECIE) {
         notificarDiscord(
