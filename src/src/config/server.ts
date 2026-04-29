@@ -4017,12 +4017,10 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
           ? (maquina as any).bonusRegras
           : [];
 
-        const regrasOrdenadas = [...regras].sort(
-          (a: any, b: any) => Number(b.valorMinimo) - Number(a.valorMinimo)
-        );
-
-        for (const regra of regrasOrdenadas) {
-          if (value >= Number(regra.valorMinimo)) {
+        const valorPagoCentavos = Math.round(value * 100);
+        for (const regra of regras) {
+          const minimoCentavos = Math.round(Number(regra.valorMinimo) * 100);
+          if (valorPagoCentavos === minimoCentavos) {
             bonusExtra = Number(regra.bonus) || 0;
             break;
           }
@@ -4034,12 +4032,14 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
             ? valorPulso
             : 1;
 
-        const valorParaLiberar = String(Math.max(0, bonusExtra) * valorPulsoSeguro);
+        const valorParaLiberar = String(
+          Math.max(0, bonusExtra) * valorPulsoSeguro
+        );
 
         await prisma.pix_Maquina.update({
           where: { id: maquina.id },
           data: {
-            valorDoPix: valorParaLiberar,
+            valorDoPix: bonusExtra > 0 ? valorParaLiberar : undefined,
             metodoPagamento: "ESPECIE",
             ultimoPagamentoRecebido: new Date(),
           },
@@ -4048,6 +4048,7 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
         await prisma.pix_Maquina.update({
           where: { id: maquina.id },
           data: {
+            metodoPagamento: "ESPECIE",
             ultimoPagamentoRecebido: new Date(),
           },
         });
@@ -4063,7 +4064,7 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
           tipo: "CASH",
           estornado: false,
           clienteId: maquina.clienteId,
-          valorBonus: podeLiberarEspecie ? bonusExtra : 0,
+          valorBonus: podeLiberarEspecie && bonusExtra > 0 ? bonusExtra : 0,
         },
       });
 
