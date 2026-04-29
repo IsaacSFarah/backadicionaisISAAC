@@ -20,6 +20,7 @@ dotenv.config();
 // Constantes de configuração
 const PORT: string | number = process.env.PORT || 5001;
 const SALT_ROUNDS = 10;
+const LINK_EXPIRACAO_MS = 7 * 24 * 60 * 60 * 1000;
 
 // Configuração do Prisma
 const prisma = new PrismaClient();
@@ -71,6 +72,26 @@ setInterval(() => {
   console.log("🧹 Limpando cache de webhooks...");
   processandoWebhooks.clear();
 }, 10 * 60 * 1000); // 10 minutos
+
+async function limparLinksExpirados() {
+  const limite = new Date(Date.now() - LINK_EXPIRACAO_MS);
+  try {
+    await prisma.pix_Link.deleteMany({
+      where: {
+        createdAt: {
+          lt: limite,
+        },
+      },
+    });
+  } catch (err) {
+    console.error("Erro ao limpar links expirados:", err);
+  }
+}
+
+limparLinksExpirados();
+setInterval(() => {
+  limparLinksExpirados();
+}, 6 * 60 * 60 * 1000);
 
 // Middlewares
 app.use(cors());
@@ -7757,6 +7778,8 @@ app.post("/gerar-link", verifyJWT, async (req: any, res) => {
 
     const id = gerarNumeroAleatorio();
 
+    await limparLinksExpirados();
+
     await prisma.pix_Link.create({
       data: {
         id,
@@ -7788,6 +7811,14 @@ app.post("/usar-link/:id", async (req, res) => {
 
     if (!link || link.usado) {
       return res.status(400).json({ error: "Link inválido ou já usado" });
+    }
+
+    const limite = new Date(Date.now() - LINK_EXPIRACAO_MS);
+    if (!link.createdAt || link.createdAt < limite) {
+      try {
+        await prisma.pix_Link.delete({ where: { id } });
+      } catch (e) {}
+      return res.status(400).json({ error: "Link expirado" });
     }
 
     const maquina = await prisma.pix_Maquina.findUnique({
@@ -7855,6 +7886,14 @@ app.get("/link/:id", async (req, res) => {
 
     if (!link) {
       return res.status(404).json({ error: "Link não encontrado" });
+    }
+
+    const limite = new Date(Date.now() - LINK_EXPIRACAO_MS);
+    if (!link.createdAt || link.createdAt < limite) {
+      try {
+        await prisma.pix_Link.delete({ where: { id } });
+      } catch (e) {}
+      return res.status(400).json({ error: "Link expirado" });
     }
 
     if (link.usado) {
