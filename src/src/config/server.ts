@@ -21,6 +21,7 @@ dotenv.config();
 const PORT: string | number = process.env.PORT || 5001;
 const SALT_ROUNDS = 10;
 const LINK_EXPIRACAO_MS = 7 * 24 * 60 * 60 * 1000;
+const MAQUINA_OFFLINE_ESTORNO_SEGUNDOS = 60;
 
 // Configuração do Prisma
 const prisma = new PrismaClient();
@@ -66,12 +67,26 @@ let valordoPixPlaquinhaPixMP: number | null = null;
 const app = express();
 
 const processandoWebhooks = new Set<string>();
+const espInFlight = new Set<string>();
+const espUltimoHeartbeat = new Map<string, number>();
+const monitoramentoCache = new Map<string, number>();
+const ESP_HEARTBEAT_WRITE_MS = 15000;
 
 // 🔥 LIMPEZA AUTOMÁTICA (IMPORTANTE)
 setInterval(() => {
   console.log("🧹 Limpando cache de webhooks...");
   processandoWebhooks.clear();
 }, 10 * 60 * 1000); // 10 minutos
+
+setInterval(() => {
+  const limite = Date.now() - 26 * 60 * 60 * 1000;
+  for (const [k, ts] of monitoramentoCache) {
+    if (ts < limite) monitoramentoCache.delete(k);
+  }
+  for (const [k, ts] of espUltimoHeartbeat) {
+    if (ts < limite) espUltimoHeartbeat.delete(k);
+  }
+}, 60 * 60 * 1000);
 
 async function limparLinksExpirados() {
   const limite = new Date(Date.now() - LINK_EXPIRACAO_MS);
@@ -793,8 +808,7 @@ app.post("/rota-recebimento-mercado-pago", async (req: any, res: any) => {
       return res.status(200).json({ mensagem: "Máquina não encontrada" });
     }
 
-    // ✅ CORREÇÃO DATE
-    if (maquina.ultimaRequisicao && tempoOffline(maquina.ultimaRequisicao) >= 10) {
+    if (maquina.ultimaRequisicao && tempoOffline(maquina.ultimaRequisicao) >= MAQUINA_OFFLINE_ESTORNO_SEGUNDOS) {
       await estornar(req.query.id);
       return res.status(200).json({ mensagem: "Estornado - máquina offline" });
     }
@@ -1865,6 +1879,10 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
   try {
 
     const maquinaId = req.params.id;
+    if (espInFlight.has(maquinaId)) {
+      return res.status(200).json({ retorno: "0000" });
+    }
+    espInFlight.add(maquinaId);
 
     const ip = req.ip; // Pegando o IP da requisição
 
@@ -1875,31 +1893,19 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
     // Converte a data ajustada para o formato ISO e passa para a função intervalo
     const intervaloAtual: string = intervalo(dataAtual.toISOString());
 
-
-    // Obtém a data atual, ajustando para começar à meia-noite
-    const inicioDiaAtual = new Date();
-    inicioDiaAtual.setHours(0, 0, 0, 0);
-
-    // Verifica se já existe um registro de monitoramento para a máquina e intervalo no dia atual
-    const ultimaRequisicao = await prisma.monitoramento.findFirst({
-      where: {
-        maquinaId: maquinaId,
-        intervalo: intervaloAtual,
-        dataHoraRequisicao: {
-          gte: inicioDiaAtual, // Filtra apenas registros do dia atual
-        },
-      },
-    });
-
-    if (!ultimaRequisicao) {
-      // Se não houver um registro para o intervalo atual, insere um novo
-      await prisma.monitoramento.create({
-        data: {
-          maquinaId: maquinaId,
-          ip: ip,
-          intervalo: intervaloAtual,
-        },
-      });
+    const diaKey = dataAtual.toISOString().slice(0, 10);
+    const monitoramentoKey = `${maquinaId}:${diaKey}:${intervaloAtual}`;
+    if (!monitoramentoCache.has(monitoramentoKey)) {
+      monitoramentoCache.set(monitoramentoKey, Date.now());
+      void prisma.monitoramento
+        .create({
+          data: {
+            maquinaId: maquinaId,
+            ip: ip,
+            intervalo: intervaloAtual,
+          },
+        })
+        .catch(() => {});
     }
 
     // 📶 PEGANDO SINAL DA ESP (CORRETO)
@@ -1908,6 +1914,16 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
     const maquina = await prisma.pix_Maquina.findUnique({
       where: {
         id: maquinaId,
+      },
+      select: {
+        id: true,
+        nome: true,
+        valorDoPix: true,
+        valorDoPulso: true,
+        metodoPagamento: true,
+        bonusAtivo: true,
+        bonusMetodos: true,
+        bonusRegras: true,
       },
     });
 
@@ -1934,13 +1950,20 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
         valorPorPulso <= 0;
 
       if (semCredito) {
-        await prisma.pix_Maquina.update({
-          where: { id: maquinaId },
-          data: {
-            ultimaRequisicao: new Date(),
-            nivelDeSinal: sinalInt,
-          },
-        });
+        const agora = Date.now();
+        const ultima = espUltimoHeartbeat.get(maquinaId) || 0;
+        if (agora - ultima >= ESP_HEARTBEAT_WRITE_MS) {
+          espUltimoHeartbeat.set(maquinaId, agora);
+          void prisma.pix_Maquina
+            .update({
+              where: { id: maquinaId },
+              data: {
+                ultimaRequisicao: new Date(),
+                nivelDeSinal: sinalInt,
+              },
+            })
+            .catch(() => {});
+        }
 
         return res.status(200).json({ retorno: "0000" });
       }
@@ -1961,17 +1984,13 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
         return res.status(200).json({ retorno: "0000" });
       }
 
-      const maquinaAtual = await prisma.pix_Maquina.findUnique({
-        where: { id: maquinaId },
-      });
+      const metodoPagamento = String(maquina.metodoPagamento || "PIX").toUpperCase();
 
-      const metodoPagamento = String(maquinaAtual?.metodoPagamento || "PIX").toUpperCase();
-
-      const metodosPermitidos = Array.isArray(maquinaAtual?.bonusMetodos)
-        ? (maquinaAtual as any).bonusMetodos.map((m: any) => String(m).toUpperCase())
+      const metodosPermitidos = Array.isArray(maquina?.bonusMetodos)
+        ? (maquina as any).bonusMetodos.map((m: any) => String(m).toUpperCase())
         : [];
 
-      const bonusAtivo = maquinaAtual?.bonusAtivo === true;
+      const bonusAtivo = maquina?.bonusAtivo === true;
 
       const pulsosBase = Math.floor(valorPixAtual / valorPorPulso);
       const pulsosBaseFormatado = String(pulsosBase).padStart(4, "0");
@@ -1987,7 +2006,7 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
         resultadoCalculo = calcularPulsosDinamicos(
           valorPixAtual,
           valorPorPulso,
-          maquinaAtual,
+          maquina,
           metodoPagamento
         );
       }
@@ -2015,25 +2034,7 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
         }
       }
 
-      // 🔥 LOG (opcional, ajuda debug)
-      if (valorPixAtual > 0) {
-        console.log(`
-🚀 CRÉDITO CONSUMIDO
-🏪 Máquina: ${maquina.nome} (${maquina.id})
-💰 Valor: ${valorPixAtualStr}
-📶 Sinal: ${nivelDeSinal}
-🕒 ${new Date().toISOString()}
-`);
-      }
-
     } else {
-
-      console.log(`
-❌ MÁQUINA NÃO ENCONTRADA
-🆔 ID: ${maquinaId}
-📶 Sinal: ${nivelDeSinal}
-`);
-
     }
 
     return res.status(200).json({ retorno: pulsosFormatados });
@@ -2048,6 +2049,8 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
 `);
 
     return res.status(500).json({ retorno: "0000" });
+  } finally {
+    espInFlight.delete(req.params.id);
   }
 });
 
@@ -3413,7 +3416,10 @@ if (!maquina) {
 // ================================
 let status = "ONLINE";
 if (maquina.ultimaRequisicao) {
-  status = (tempoOffline(new Date(maquina.ultimaRequisicao))) > 60 ? "OFFLINE" : "ONLINE";
+  status =
+    tempoOffline(new Date(maquina.ultimaRequisicao)) > MAQUINA_OFFLINE_ESTORNO_SEGUNDOS
+      ? "OFFLINE"
+      : "ONLINE";
 } else {
   status = "OFFLINE";
 }
