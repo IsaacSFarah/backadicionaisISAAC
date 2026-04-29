@@ -2013,6 +2013,14 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
 
       pulsosFormatados = resultadoCalculo.pulsos;
 
+      console.log(
+        `ESP consumiu crédito | maquinaId=${maquinaId} nome=${maquina.nome} metodo=${metodoPagamento} valor=${valorPixAtual.toFixed(
+          2
+        )} pulso=${valorPorPulso} pulsos=${pulsosFormatados} bonus=${resultadoCalculo.bonus} ip=${ip} sinal=${
+          sinalInt ?? ""
+        }`
+      );
+
       if (podeAplicarBonus && resultadoCalculo.bonus > 0) {
         try {
           const ultimoPagamento = await prisma.pix_Pagamento.findFirst({
@@ -4044,6 +4052,11 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
 
       let bonusExtra = 0;
 
+      const valorNotaTexto =
+        Number.isFinite(value) && value >= 0
+          ? value.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })
+          : "R$ 0,00";
+
       if (podeLiberarEspecie) {
         const regras = Array.isArray((maquina as any)?.bonusRegras)
           ? (maquina as any).bonusRegras
@@ -4092,7 +4105,7 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
           maquinaId: maquina.id,
           valor: String(value),
           mercadoPagoId: "CASH",
-          motivoEstorno: ``,
+          motivoEstorno: podeLiberarEspecie ? `Observação: 1 nota de ${valorNotaTexto}` : ``,
           tipo: "CASH",
           estornado: false,
           clienteId: maquina.clienteId,
@@ -7117,7 +7130,6 @@ app.get("/payments-client", verifyJWT, async (req: any, res) => {
       valorCash: valorCash,
       qtd: qtd,
       valorTotal: valorTotal,
-      servidor: 'testeisaac-atualiza-es',
       pagamentosRecentes: pagamentosRecentes.map(pagamento => ({
         id: pagamento.id,
         valor: pagamento.valor,
