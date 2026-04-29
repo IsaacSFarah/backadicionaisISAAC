@@ -1468,8 +1468,12 @@ app.put("/maquina", verifyJwtPessoa, async (req: any, res) => {
         {
           OR: [
             req.body.nome ? { nome: req.body.nome } : undefined,
-            req.body.store_id !== "" ? { store_id: req.body.store_id } : undefined,
-            req.body.maquininha_serial !== "" ? { maquininha_serial: req.body.maquininha_serial } : undefined
+            typeof req.body.store_id !== "undefined" && req.body.store_id !== ""
+              ? { store_id: req.body.store_id }
+              : undefined,
+            typeof req.body.maquininha_serial !== "undefined" && req.body.maquininha_serial !== ""
+              ? { maquininha_serial: req.body.maquininha_serial }
+              : undefined
           ].filter(Boolean) // Remove condições indefinidas
         },
         { NOT: { id: req.body.id } } // Exclui a máquina atual da verificação
@@ -1568,8 +1572,12 @@ app.put("/maquina-cliente", verifyJWT, async (req: any, res) => {
         {
           OR: [
             req.body.nome ? { nome: req.body.nome } : undefined,
-            req.body.store_id !== "" ? { store_id: req.body.store_id } : undefined,
-            req.body.maquininha_serial !== "" ? { maquininha_serial: req.body.maquininha_serial } : undefined
+            typeof req.body.store_id !== "undefined" && req.body.store_id !== ""
+              ? { store_id: req.body.store_id }
+              : undefined,
+            typeof req.body.maquininha_serial !== "undefined" && req.body.maquininha_serial !== ""
+              ? { maquininha_serial: req.body.maquininha_serial }
+              : undefined
           ].filter(Boolean) // Remove condições indefinidas
         },
         { NOT: { id: req.body.id } } // Exclui a máquina atual da verificação
