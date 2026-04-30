@@ -2355,8 +2355,8 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
   try {
     const agora = Date.now();
 
-    // 🔥 CACHE 5 MIN
-    if (cache[userId] && (agora - cacheTime[userId]) < 300000) {
+    // 🔥 CACHE 30s
+    if (cache[userId] && (agora - cacheTime[userId]) < 30000) {
       console.log("⚡ usando cache");
       return res.status(200).json(cache[userId]);
     }
@@ -2375,6 +2375,30 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
 
     const maquinaIds = maquinas.map((m) => m.id);
 
+    const parseValorPagamento = (raw: any): number => {
+      if (raw === null || raw === undefined) return 0;
+      let s = String(raw).trim();
+      if (!s) return 0;
+      s = s.replace(/^R\$\s*/i, "").replace(/\s/g, "");
+
+      if (s.includes(",")) {
+        s = s.replace(/\./g, "").replace(",", ".");
+      } else {
+        const dotMatches = s.match(/\./g) || [];
+        if (dotMatches.length > 1) {
+          s = s.replace(/\./g, "");
+        } else if (dotMatches.length === 1) {
+          const parts = s.split(".");
+          if (parts.length === 2 && parts[1].length === 3) {
+            s = parts[0] + parts[1];
+          }
+        }
+      }
+
+      const n = Number.parseFloat(s);
+      return Number.isFinite(n) ? n : 0;
+    };
+
     const offsetMinutes = -180;
     const now = new Date();
     const nowSP = new Date(now.getTime() + offsetMinutes * 60_000);
@@ -2388,6 +2412,7 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
       where: {
         maquinaId: { in: maquinaIds },
         estornado: false,
+        removido: false,
         data: {
           gte: startUTC,
           lt: endUTC,
@@ -2402,11 +2427,7 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
     const faturamentoMap: Record<string, number> = {};
 
     pagamentosHoje.forEach((p: any) => {
-      const valor = Number(
-        String(p.valor || "0")
-          .replace(/\./g, "")
-          .replace(",", ".")
-      );
+      const valor = parseValorPagamento(p.valor);
 
       if (!faturamentoMap[p.maquinaId]) {
         faturamentoMap[p.maquinaId] = 0;
@@ -2419,6 +2440,7 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
       where: {
         maquinaId: { in: maquinaIds },
         estornado: false,
+        removido: false,
         data: {
           gte: startUTCOntem,
           lt: endUTCOntem,
@@ -2433,11 +2455,7 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
     const faturamentoOntemMap: Record<string, number> = {};
 
     pagamentosOntem.forEach((p: any) => {
-      const valor = Number(
-        String(p.valor || "0")
-          .replace(/\./g, "")
-          .replace(",", ".")
-      );
+      const valor = parseValorPagamento(p.valor);
 
       if (!faturamentoOntemMap[p.maquinaId]) {
         faturamentoOntemMap[p.maquinaId] = 0;
