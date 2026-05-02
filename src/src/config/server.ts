@@ -8035,4 +8035,4 @@ app.get("/link/:id", async (req, res) => {
 
 //git push 
 
-// Aplicação já está ouvindo acima; evite múltiplos app.listen.
+// Aplicação já está ouvindo acima; evite múltiplos a
