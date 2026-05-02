@@ -1405,8 +1405,8 @@ app.put('/recuperar-id-maquina/:id', verifyJwtPessoa, async (req, res) => {
       return res.status(400).json({ error: "Já existe uma máquina com esse novo ID" });
     }
 
-    await prisma.$transaction(async (tx) => {
-      await tx.pix_Maquina.create({
+    await prisma.$transaction([
+      prisma.pix_Maquina.create({
         data: {
           id: novoId,
           pessoaId: maquinaExistente.pessoaId,
@@ -1422,42 +1422,36 @@ app.put('/recuperar-id-maquina/:id', verifyJwtPessoa, async (req, res) => {
           ultimoPagamentoRecebido: maquinaExistente.ultimoPagamentoRecebido,
           ultimaRequisicao: maquinaExistente.ultimaRequisicao,
           nivelDeSinal: maquinaExistente.nivelDeSinal,
-          bonusRegras: maquinaExistente.bonusRegras,
+          bonusRegras: maquinaExistente.bonusRegras ?? undefined,
           bonusAtivo: maquinaExistente.bonusAtivo,
-          bonusMetodos: maquinaExistente.bonusMetodos,
+          bonusMetodos: maquinaExistente.bonusMetodos ?? undefined,
           metodoPagamento: maquinaExistente.metodoPagamento,
         },
-      });
-
-      await tx.pix_Pagamento.updateMany({
+      }),
+      prisma.pix_Pagamento.updateMany({
         where: { maquinaId: id },
         data: { maquinaId: novoId },
-      });
-
-      await tx.pix_Link.updateMany({
+      }),
+      prisma.pix_Link.updateMany({
         where: { maquinaId: id },
         data: { maquinaId: novoId },
-      });
-
-      await tx.monitoramento.updateMany({
+      }),
+      prisma.monitoramento.updateMany({
         where: { maquinaId: id },
         data: { maquinaId: novoId },
-      });
-
-      await tx.creditoRemoto.updateMany({
+      }),
+      prisma.creditoRemoto.updateMany({
         where: { idMaquina: id },
         data: { idMaquina: novoId },
-      });
-
-      await tx.configuracaoMaquina.updateMany({
+      }),
+      prisma.configuracaoMaquina.updateMany({
         where: { idMaquina: id },
         data: { idMaquina: novoId },
-      });
-
-      await tx.pix_Maquina.delete({
+      }),
+      prisma.pix_Maquina.delete({
         where: { id },
-      });
-    });
+      }),
+    ]);
 
     const maquinaAtualizada = await prisma.pix_Maquina.findUnique({
       where: { id: novoId },
