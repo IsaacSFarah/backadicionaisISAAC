@@ -3,7 +3,6 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-// Importações de pacotes
 const client_1 = require("@prisma/client");
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
@@ -20,6 +19,8 @@ dotenv_1.default.config();
 // Constantes de configuração
 const PORT = process.env.PORT || 5001;
 const SALT_ROUNDS = 10;
+const LINK_EXPIRACAO_MS = 7 * 24 * 60 * 60 * 1000;
+const MAQUINA_OFFLINE_ESTORNO_SEGUNDOS = 60;
 // Configuração do Prisma
 const prisma = new client_1.PrismaClient();
 // Configuração de email
@@ -55,7 +56,46 @@ let valordoPixMaquinaBatomEfi01 = null;
 let valordoPixPlaquinhaPixMP = null;
 // Inicialização do Express
 const app = (0, express_1.default)();
-
+const processandoWebhooks = new Set();
+const espInFlight = new Set();
+const espUltimoHeartbeat = new Map();
+const monitoramentoCache = new Map();
+const ESP_HEARTBEAT_WRITE_MS = 15000;
+// 🔥 LIMPEZA AUTOMÁTICA (IMPORTANTE)
+setInterval(() => {
+    console.log("🧹 Limpando cache de webhooks...");
+    processandoWebhooks.clear();
+}, 10 * 60 * 1000); // 10 minutos
+setInterval(() => {
+    const limite = Date.now() - 26 * 60 * 60 * 1000;
+    for (const [k, ts] of monitoramentoCache) {
+        if (ts < limite)
+            monitoramentoCache.delete(k);
+    }
+    for (const [k, ts] of espUltimoHeartbeat) {
+        if (ts < limite)
+            espUltimoHeartbeat.delete(k);
+    }
+}, 60 * 60 * 1000);
+async function limparLinksExpirados() {
+    const limite = new Date(Date.now() - LINK_EXPIRACAO_MS);
+    try {
+        await prisma.pix_Link.deleteMany({
+            where: {
+                createdAt: {
+                    lt: limite,
+                },
+            },
+        });
+    }
+    catch (err) {
+        console.error("Erro ao limpar links expirados:", err);
+    }
+}
+limparLinksExpirados();
+setInterval(() => {
+    limparLinksExpirados();
+}, 6 * 60 * 60 * 1000);
 // Middlewares
 app.use((0, cors_1.default)());
 app.use(body_parser_1.default.urlencoded({ extended: true }));
@@ -136,6 +176,44 @@ const PIX_CONFIG = {
     MAQUINA_BATOM_EFI01: 0,
     PLAQUINHA_PIX_MP: 5000 // storeid
 };
+/**
+ * Calcula a quantidade de pulsos com base no valor pago e nas regras de bônus ativas na máquina
+ * @param valorPix Valor pago via PIX
+ * @param valorPorPulso Valor base de cada pulso
+ * @param maquina Objeto da máquina com configurações de bônus
+ * @returns Objeto com pulsos formatados e valor do bônus aplicado
+ */
+function calcularPulsosDinamicos(valorPix, valorPorPulso = 1.0, maquina, metodoPagamento) {
+    const metodo = (metodoPagamento || "PIX").toUpperCase();
+    let pulsosBase = Math.floor(valorPix / valorPorPulso);
+    let bonusExtra = 0;
+    // 🔒 normaliza métodos permitidos
+    const metodosPermitidos = Array.isArray(maquina?.bonusMetodos)
+        ? maquina.bonusMetodos.map((m) => String(m).toUpperCase())
+        : [];
+    // 🎯 regra final do bônus
+    const podeAplicarBonus = maquina?.bonusAtivo === true &&
+        metodo !== "REMOTO" &&
+        metodosPermitidos.includes(metodo);
+    if (podeAplicarBonus) {
+        const regras = Array.isArray(maquina?.bonusRegras)
+            ? maquina.bonusRegras
+            : [];
+        // ordena da maior regra para menor
+        const regrasOrdenadas = [...regras].sort((a, b) => Number(b.valorMinimo) - Number(a.valorMinimo));
+        for (const regra of regrasOrdenadas) {
+            if (valorPix >= Number(regra.valorMinimo)) {
+                bonusExtra = Number(regra.bonus) || 0;
+                break;
+            }
+        }
+    }
+    const total = pulsosBase + bonusExtra;
+    return {
+        pulsos: String(total).padStart(4, "0"),
+        bonus: bonusExtra,
+    };
+}
 /**
  * Converte o valor do PIX recebido em pulsos
  * @param valorPix Valor do PIX recebido
@@ -378,7 +456,8 @@ const WEBHOOK_CONFIG = {
  */
 app.get("/consulta-maquina01", async (req, res) => {
     try {
-        const pulsosFormatados = converterPixRecebido(MAQUINAS.MAQUINA_01.valor);
+        const resultado = calcularPulsosDinamicos(MAQUINAS.MAQUINA_01.valor, 1.0, null);
+        const pulsosFormatados = resultado.pulsos;
         // Resetar valor e atualizar último acesso
         MAQUINAS.MAQUINA_01.valor = 0;
         MAQUINAS.MAQUINA_01.ultimoAcesso = new Date();
@@ -494,7 +573,8 @@ app.get("/monitoramento-html", async (req, res) => {
     res.send(html);
 });
 app.get("/consulta-pix-efi-maq-batom-01", async (req, res) => {
-    var pulsosFormatados = converterPixRecebido(valordoPixMaquinaBatomEfi01 ?? 0); //<<<<<<ALTERAR PARA O NUMERO DA MAQUINA
+    const resultado = calcularPulsosDinamicos(valordoPixMaquinaBatomEfi01 ?? 0, 1.0, null);
+    var pulsosFormatados = resultado.pulsos;
     valordoPixMaquinaBatomEfi01 = 0; //<<<<<<<<<ALTERAR PARA O NUMERO DA MAQUINA
     if (pulsosFormatados != "0000") {
         return res.status(200).json({ "retorno": pulsosFormatados });
@@ -569,39 +649,49 @@ app.post("/rota-recebimento-teste", async (req, res) => {
 });
 app.post("/rota-recebimento-mercado-pago", async (req, res) => {
     try {
-        console.log("Novo pix do Mercado Pago:");
+        console.log("Novo pagamento do Mercado Pago:");
         console.log(req.body);
-        console.log("id");
-        console.log(req.query.id);
-        var url = "https://api.mercadopago.com/v1/payments/" + req.query.id;
-        axios_1.default.get(url)
-            .then((response) => {
-            //console.log('Response', response.data)
-            if (response.data.status != "approved") {
-                console.log("pagamento não aprovado!");
-                return;
-            }
-            console.log('store_id', response.data.store_id);
-            console.log('storetransaction_amount_id', response.data.transaction_amount);
-            //creditar de acordo com o store_id (um para cada maq diferente)
-            if (response.data.store_id == '56155276') {
-                if (tempoOffline(ultimoAcessoMaquina01) >= 10) {
-                    console.log("Efetuando estorno - Máquina Offline!");
-                    estornar(req.query.id);
-                }
-                else {
-                    console.log("Creditando pix na máquina 1. store_id(56155276)");
-                    valorDoPixMaquina01 = response.data.transaction_amount;
-                    valordoPixPlaquinhaPixMP = response.data.transaction_amount;
-                }
+        const url = "https://api.mercadopago.com/v1/payments/" + req.query.id;
+        const response = await axios_1.default.get(url);
+        if (response.data.status != "approved") {
+            console.log("pagamento não aprovado!");
+            return res.status(200).json({ mensagem: "Pagamento não aprovado" });
+        }
+        let metodoPagamento = "PIX";
+        if (response.data.payment_type_id === "credit_card") {
+            metodoPagamento = "CREDITO";
+        }
+        else if (response.data.payment_type_id === "debit_card") {
+            metodoPagamento = "DEBITO";
+        }
+        const maquina = await prisma.pix_Maquina.findFirst({
+            where: { store_id: response.data.store_id }
+        });
+        if (!maquina) {
+            return res.status(200).json({ mensagem: "Máquina não encontrada" });
+        }
+        if (maquina.ultimaRequisicao && tempoOffline(maquina.ultimaRequisicao) >= MAQUINA_OFFLINE_ESTORNO_SEGUNDOS) {
+            await estornar(req.query.id);
+            return res.status(200).json({ mensagem: "Estornado - máquina offline" });
+        }
+        await prisma.pix_Maquina.update({
+            where: { id: maquina.id },
+            data: {
+                valorDoPix: String(response.data.transaction_amount),
+                metodoPagamento: metodoPagamento,
+                ultimoPagamentoRecebido: new Date()
             }
         });
+        delete cache[maquina.clienteId];
+        delete cacheTime[maquina.clienteId];
+        valorDoPixMaquina01 = response.data.transaction_amount;
+        valordoPixPlaquinhaPixMP = response.data.transaction_amount;
+        return res.status(200).json({ mensagem: "ok" });
     }
     catch (error) {
         console.error(error);
-        return res.status(402).json({ "error": "error: " + error });
+        return res.status(402).json({ error: "error: " + error });
     }
-    return res.status(200).json({ "mensagem": "ok" });
 });
 //fim integração pix V2
 //rotas integração pix  v3
@@ -675,9 +765,10 @@ app.post("/new-cliente", async (req, res) => {
         // 2️⃣ Criptografar senha
         const salt = await bcrypt_1.default.genSalt(10);
         const senhaHash = await bcrypt_1.default.hash(senha, salt);
-        req.body.pessoaId = '0baec2aa-7561-4f62-9c85-8e7075511e6c';
+        req.body.pessoaId = 'd37ae2e9-ced6-432d-97f5-4e7da5c946fb';
+        req.body.senha = senhaHash;
         const cliente = await prisma.pix_Cliente.create({ data: req.body });
-        cliente.senha = "";
+        cliente.senha = senhaHash;
         return res.json(cliente);
     }
     catch (err) {
@@ -1027,8 +1118,22 @@ app.post("/maquina-cliente", verifyJWT, async (req, res) => {
 });
 app.put('/recuperar-id-maquina/:id', verifyJwtPessoa, async (req, res) => {
     const { id } = req.params;
-    const { novoId } = req.body;
+    const novoId = String(req.body?.novoId ?? "").trim();
     try {
+        if (!novoId) {
+            return res.status(400).json({ error: "novoId é obrigatório" });
+        }
+        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+        if (!uuidRegex.test(novoId)) {
+            return res.status(400).json({ error: "novoId inválido (precisa ser UUID)" });
+        }
+        if (id === novoId) {
+            const maquinaAtual = await prisma.pix_Maquina.findUnique({ where: { id } });
+            if (!maquinaAtual) {
+                return res.status(404).json({ error: "Máquina não encontrada" });
+            }
+            return res.json({ message: "ID da máquina atualizado com sucesso", maquina: maquinaAtual });
+        }
         // Verifica se a máquina com o ID atual existe
         const maquinaExistente = await prisma.pix_Maquina.findUnique({
             where: { id },
@@ -1036,15 +1141,77 @@ app.put('/recuperar-id-maquina/:id', verifyJwtPessoa, async (req, res) => {
         if (!maquinaExistente) {
             return res.status(404).json({ error: 'Máquina não encontrada' });
         }
-        // Atualiza o ID da máquina
-        const maquinaAtualizada = await prisma.pix_Maquina.update({
-            where: { id },
-            data: { id: novoId },
+        const maquinaComNovoId = await prisma.pix_Maquina.findUnique({
+            where: { id: novoId },
+            select: { id: true },
         });
-        res.json({ message: 'ID da máquina atualizado com sucesso', maquina: maquinaAtualizada });
+        if (maquinaComNovoId) {
+            return res.status(400).json({ error: "Já existe uma máquina com esse novo ID" });
+        }
+        await prisma.$transaction([
+            prisma.pix_Maquina.create({
+                data: {
+                    id: novoId,
+                    pessoaId: maquinaExistente.pessoaId,
+                    clienteId: maquinaExistente.clienteId,
+                    nome: maquinaExistente.nome,
+                    descricao: maquinaExistente.descricao,
+                    store_id: null,
+                    maquininha_serial: null,
+                    estoque: maquinaExistente.estoque,
+                    valorDoPix: maquinaExistente.valorDoPix,
+                    valorDoPulso: maquinaExistente.valorDoPulso,
+                    dataInclusao: maquinaExistente.dataInclusao,
+                    ultimoPagamentoRecebido: maquinaExistente.ultimoPagamentoRecebido,
+                    ultimaRequisicao: maquinaExistente.ultimaRequisicao,
+                    nivelDeSinal: maquinaExistente.nivelDeSinal,
+                    bonusRegras: maquinaExistente.bonusRegras ?? undefined,
+                    bonusAtivo: maquinaExistente.bonusAtivo,
+                    bonusMetodos: maquinaExistente.bonusMetodos ?? undefined,
+                    metodoPagamento: maquinaExistente.metodoPagamento,
+                },
+            }),
+            prisma.pix_Pagamento.updateMany({
+                where: { maquinaId: id },
+                data: { maquinaId: novoId },
+            }),
+            prisma.pix_Link.updateMany({
+                where: { maquinaId: id },
+                data: { maquinaId: novoId },
+            }),
+            prisma.monitoramento.updateMany({
+                where: { maquinaId: id },
+                data: { maquinaId: novoId },
+            }),
+            prisma.creditoRemoto.updateMany({
+                where: { idMaquina: id },
+                data: { idMaquina: novoId },
+            }),
+            prisma.configuracaoMaquina.updateMany({
+                where: { idMaquina: id },
+                data: { idMaquina: novoId },
+            }),
+            prisma.pix_Maquina.delete({
+                where: { id },
+            }),
+            prisma.pix_Maquina.update({
+                where: { id: novoId },
+                data: {
+                    store_id: maquinaExistente.store_id,
+                    maquininha_serial: maquinaExistente.maquininha_serial,
+                },
+            }),
+        ]);
+        const maquinaAtualizada = await prisma.pix_Maquina.findUnique({
+            where: { id: novoId },
+        });
+        res.json({ message: "ID da máquina atualizado com sucesso", maquina: maquinaAtualizada });
     }
     catch (error) {
         console.error('Erro ao alterar o ID da máquina:', error);
+        if (error?.code === "P2002") {
+            return res.status(400).json({ error: "Conflito ao alterar o ID da máquina" });
+        }
         res.status(500).json({ error: 'Erro ao alterar o ID da máquina' });
     }
 });
@@ -1140,19 +1307,27 @@ app.put("/maquina", verifyJwtPessoa, async (req, res) => {
             });
         }
         // Se não houver conflitos, atualiza a máquina
+        // Monta o objeto de atualização sem sobrescrever campos não enviados
+        const dataUpdate1 = {
+            nome: req.body.nome,
+            descricao: req.body.descricao,
+            valorDoPulso: req.body.valorDoPulso,
+            estoque: req.body.estoque,
+            bonusAtivo: req.body.bonusAtivo,
+            bonusRegras: req.body.bonusRegras,
+            bonusMetodos: req.body.bonusMetodos,
+        };
+        // Atualiza store_id somente se vier no body; vazio limpa explicitamente
+        if (typeof req.body.store_id !== 'undefined') {
+            dataUpdate1.store_id = req.body.store_id === "" ? null : req.body.store_id;
+        }
+        // Atualiza maquininha_serial somente se vier no body; vazio limpa explicitamente
+        if (typeof req.body.maquininha_serial !== 'undefined') {
+            dataUpdate1.maquininha_serial = req.body.maquininha_serial === "" ? null : req.body.maquininha_serial;
+        }
         const maquinaAtualizada = await prisma.pix_Maquina.update({
-            where: {
-                id: req.body.id,
-            },
-            data: {
-                nome: req.body.nome,
-                descricao: req.body.descricao,
-                store_id: req.body.store_id || null,
-                maquininha_serial: req.body.maquininha_serial || null,
-                valorDoPulso: req.body.valorDoPulso,
-                estoque: req.body.estoque
-                // Adicione outros campos conforme necessário
-            },
+            where: { id: req.body.id },
+            data: dataUpdate1,
         });
         console.log('Máquina atualizada com sucesso:', maquinaAtualizada);
         return res.status(200).json(maquinaAtualizada);
@@ -1160,6 +1335,22 @@ app.put("/maquina", verifyJwtPessoa, async (req, res) => {
     catch (err) {
         console.log(err);
         return res.status(500).json({ error: `Erro ao atualizar a máquina: ${err.message}` });
+    }
+});
+app.get("/maquina/:id", async (req, res) => {
+    try {
+        const { id } = req.params;
+        const maquina = await prisma.pix_Maquina.findUnique({
+            where: { id },
+        });
+        if (!maquina) {
+            return res.status(404).json({ error: "Máquina não encontrada" });
+        }
+        return res.json(maquina);
+    }
+    catch (error) {
+        console.error("Erro ao buscar máquina:", error);
+        return res.status(500).json({ error: "Erro interno" });
     }
 });
 app.put("/maquina-cliente", verifyJWT, async (req, res) => {
@@ -1202,19 +1393,27 @@ app.put("/maquina-cliente", verifyJWT, async (req, res) => {
             });
         }
         // Se não houver conflitos, atualiza a máquina
+        // Monta o objeto de atualização sem sobrescrever campos não enviados
+        const dataUpdate2 = {
+            nome: req.body.nome,
+            descricao: req.body.descricao,
+            valorDoPulso: req.body.valorDoPulso,
+            estoque: req.body.estoque,
+            bonusAtivo: req.body.bonusAtivo,
+            bonusRegras: req.body.bonusRegras,
+            bonusMetodos: req.body.bonusMetodos,
+        };
+        // Atualiza store_id somente se vier no body; vazio limpa explicitamente
+        if (typeof req.body.store_id !== 'undefined') {
+            dataUpdate2.store_id = req.body.store_id === "" ? null : req.body.store_id;
+        }
+        // Atualiza maquininha_serial somente se vier no body; vazio limpa explicitamente
+        if (typeof req.body.maquininha_serial !== 'undefined') {
+            dataUpdate2.maquininha_serial = req.body.maquininha_serial === "" ? null : req.body.maquininha_serial;
+        }
         const maquinaAtualizada = await prisma.pix_Maquina.update({
-            where: {
-                id: req.body.id,
-            },
-            data: {
-                nome: req.body.nome,
-                descricao: req.body.descricao,
-                store_id: req.body.store_id || null,
-                maquininha_serial: req.body.maquininha_serial || null,
-                valorDoPulso: req.body.valorDoPulso,
-                estoque: req.body.estoque
-                // Adicione outros campos conforme necessário
-            },
+            where: { id: req.body.id },
+            data: dataUpdate2,
         });
         console.log('Máquina atualizada com sucesso:', maquinaAtualizada);
         return res.status(200).json(maquinaAtualizada);
@@ -1375,70 +1574,226 @@ app.get("/consultar-maquina/:id", async (req: any, res) => {
   }
 });
 */
+// app.get("/consultar-maquina/:id", async (req: any, res) => {
+//   try {
+//     const maquinaId = req.params.id;
+//     const ip = req.ip; // Pegando o IP da requisição
+//     // Exibe o parâmetro nivelDeSinal no console.log
+//     const nivelDeSinal = req.query.nivelDeSinal;
+//     //console.log("Nível de Sinal:", nivelDeSinal);
+//     // Cria uma nova data e subtrai 3 horas
+//     const dataAtual = new Date();
+//     dataAtual.setHours(dataAtual.getHours() - 3);
+//     // Converte a data ajustada para o formato ISO e passa para a função intervalo
+//     const intervaloAtual: string = intervalo(dataAtual.toISOString());
+//     // Obtém a data atual, ajustando para começar à meia-noite
+//     const inicioDiaAtual = new Date();
+//     inicioDiaAtual.setHours(0, 0, 0, 0);
+//     // Verifica se já existe um registro de monitoramento para a máquina e intervalo no dia atual
+//     const ultimaRequisicao = await prisma.monitoramento.findFirst({
+//       where: {
+//         maquinaId: maquinaId,
+//         intervalo: intervaloAtual,
+//         dataHoraRequisicao: {
+//           gte: inicioDiaAtual, // Filtra apenas registros do dia atual
+//         },
+//       },
+//     });
+//     if (!ultimaRequisicao) {
+//       // Se não houver um registro para o intervalo atual, insere um novo
+//       await prisma.monitoramento.create({
+//         data: {
+//           maquinaId: maquinaId,
+//           ip: ip,
+//           intervalo: intervaloAtual, // Salva o intervalo atual
+//         },
+//       });
+//     }
+//     const maquina = await prisma.pix_Maquina.findUnique({
+//       where: {
+//         id: maquinaId,
+//       },
+//     });
+//     var pulsosFormatados = "";
+//     if (maquina != null) {
+//       pulsosFormatados = converterPixRecebidoDinamico(parseFloat(maquina.valorDoPix), parseFloat(maquina.valorDoPulso));
+//       //console.log("encontrou"); // Zerar o valor e atualizar data de último acesso
+//       await prisma.pix_Maquina.update({
+//         where: {
+//           id: maquinaId,
+//         },
+//         data: {
+//           valorDoPix: "0",
+//           ultimaRequisicao: new Date(Date.now()),
+//           nivelDeSinal: (nivelDeSinal != undefined) ? parseInt(nivelDeSinal) : null
+//         },
+//       });
+//     } else {
+//       pulsosFormatados = "0000";
+//       console.log("Máquina não encontrada");
+//     }
+//     return res.status(200).json({ "retorno": pulsosFormatados });
+//   } catch (err: any) {
+//     console.log(err);
+//     return res.status(500).json({ "retorno": "0000" });
+//   }
+// });
 app.get("/consultar-maquina/:id", async (req, res) => {
     try {
         const maquinaId = req.params.id;
+        if (espInFlight.has(maquinaId)) {
+            return res.status(200).json({ retorno: "0000" });
+        }
+        espInFlight.add(maquinaId);
         const ip = req.ip; // Pegando o IP da requisição
-        // Exibe o parâmetro nivelDeSinal no console.log
-        const nivelDeSinal = req.query.nivelDeSinal;
-        //console.log("Nível de Sinal:", nivelDeSinal);
         // Cria uma nova data e subtrai 3 horas
         const dataAtual = new Date();
         dataAtual.setHours(dataAtual.getHours() - 3);
         // Converte a data ajustada para o formato ISO e passa para a função intervalo
         const intervaloAtual = intervalo(dataAtual.toISOString());
-        // Obtém a data atual, ajustando para começar à meia-noite
-        const inicioDiaAtual = new Date();
-        inicioDiaAtual.setHours(0, 0, 0, 0);
-        // Verifica se já existe um registro de monitoramento para a máquina e intervalo no dia atual
-        const ultimaRequisicao = await prisma.monitoramento.findFirst({
-            where: {
-                maquinaId: maquinaId,
-                intervalo: intervaloAtual,
-                dataHoraRequisicao: {
-                    gte: inicioDiaAtual, // Filtra apenas registros do dia atual
-                },
-            },
-        });
-        if (!ultimaRequisicao) {
-            // Se não houver um registro para o intervalo atual, insere um novo
-            await prisma.monitoramento.create({
+        const diaKey = dataAtual.toISOString().slice(0, 10);
+        const monitoramentoKey = `${maquinaId}:${diaKey}:${intervaloAtual}`;
+        if (!monitoramentoCache.has(monitoramentoKey)) {
+            monitoramentoCache.set(monitoramentoKey, Date.now());
+            void prisma.monitoramento
+                .create({
                 data: {
                     maquinaId: maquinaId,
                     ip: ip,
-                    intervalo: intervaloAtual, // Salva o intervalo atual
+                    intervalo: intervaloAtual,
                 },
-            });
+            })
+                .catch(() => { });
         }
+        // 📶 PEGANDO SINAL DA ESP (CORRETO)
+        const nivelDeSinal = req.query.nivelDeSinal;
         const maquina = await prisma.pix_Maquina.findUnique({
             where: {
                 id: maquinaId,
             },
+            select: {
+                id: true,
+                clienteId: true,
+                nome: true,
+                valorDoPix: true,
+                valorDoPulso: true,
+                metodoPagamento: true,
+                bonusAtivo: true,
+                bonusMetodos: true,
+                bonusRegras: true,
+            },
         });
-        var pulsosFormatados = "";
-        if (maquina != null) {
-            pulsosFormatados = converterPixRecebidoDinamico(parseFloat(maquina.valorDoPix), parseFloat(maquina.valorDoPulso));
-            //console.log("encontrou"); // Zerar o valor e atualizar data de último acesso
-            await prisma.pix_Maquina.update({
+        let pulsosFormatados = "0000";
+        if (maquina) {
+            // 🔢 CONVERTE PIX EM PULSOS COM LÓGICA DE BÔNUS DINÂMICO DA MÁQUINA
+            const valorPixAtualStr = String(maquina.valorDoPix || "0");
+            const valorPixAtual = parseFloat(valorPixAtualStr);
+            const valorPorPulso = parseFloat(maquina.valorDoPulso || "1");
+            const sinalInt = nivelDeSinal != undefined ? parseInt(String(nivelDeSinal)) : null;
+            const semCredito = !valorPixAtual ||
+                Number.isNaN(valorPixAtual) ||
+                valorPixAtual <= 0 ||
+                !valorPorPulso ||
+                Number.isNaN(valorPorPulso) ||
+                valorPorPulso <= 0;
+            if (semCredito) {
+                const agora = Date.now();
+                const ultima = espUltimoHeartbeat.get(maquinaId) || 0;
+                if (agora - ultima >= ESP_HEARTBEAT_WRITE_MS) {
+                    espUltimoHeartbeat.set(maquinaId, agora);
+                    void prisma.pix_Maquina
+                        .update({
+                        where: { id: maquinaId },
+                        data: {
+                            ultimaRequisicao: new Date(),
+                            nivelDeSinal: sinalInt,
+                        },
+                    })
+                        .catch(() => { });
+                }
+                return res.status(200).json({ retorno: "0000" });
+            }
+            const consumiuCredito = await prisma.pix_Maquina.updateMany({
                 where: {
                     id: maquinaId,
+                    valorDoPix: valorPixAtualStr,
                 },
                 data: {
                     valorDoPix: "0",
-                    ultimaRequisicao: new Date(Date.now()),
-                    nivelDeSinal: (nivelDeSinal != undefined) ? parseInt(nivelDeSinal) : null
+                    ultimaRequisicao: new Date(),
+                    nivelDeSinal: sinalInt,
                 },
             });
+            if (consumiuCredito.count === 0) {
+                return res.status(200).json({ retorno: "0000" });
+            }
+            const metodoPagamento = String(maquina.metodoPagamento || "PIX").toUpperCase();
+            const metodosPermitidos = Array.isArray(maquina?.bonusMetodos)
+                ? maquina.bonusMetodos.map((m) => String(m).toUpperCase())
+                : [];
+            const bonusAtivo = maquina?.bonusAtivo === true;
+            const pulsosBase = Math.floor(valorPixAtual / valorPorPulso);
+            const pulsosBaseFormatado = String(pulsosBase).padStart(4, "0");
+            const podeAplicarBonus = bonusAtivo &&
+                metodoPagamento !== "ESPECIE" &&
+                metodoPagamento !== "REMOTO" &&
+                metodosPermitidos.includes(metodoPagamento);
+            let resultadoCalculo = { pulsos: pulsosBaseFormatado, bonus: 0 };
+            if (podeAplicarBonus) {
+                resultadoCalculo = calcularPulsosDinamicos(valorPixAtual, valorPorPulso, maquina, metodoPagamento);
+            }
+            pulsosFormatados = resultadoCalculo.pulsos;
+            const valorCreditoTexto = Number.isFinite(valorPixAtual)
+                ? valorPixAtual.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })
+                : "";
+            console.log(`
+🎮 CRÉDITO CONSUMIDO (ESP)
+👤 ClienteId: ${maquina.clienteId || ""}
+🏪 Máquina: ${maquina.nome} (${maquinaId})
+💳 Método: ${metodoPagamento}
+💵 Valor: ${valorCreditoTexto}
+🔢 Pulso: ${valorPorPulso}
+🧮 Pulsos: ${pulsosFormatados}
+🎁 Bônus: ${resultadoCalculo.bonus}
+🌐 IP: ${ip}
+📶 Sinal: ${sinalInt ?? ""}
+`);
+            if (podeAplicarBonus && resultadoCalculo.bonus > 0) {
+                try {
+                    const ultimoPagamento = await prisma.pix_Pagamento.findFirst({
+                        where: {
+                            maquinaId: maquinaId,
+                            valorBonus: 0,
+                        },
+                        orderBy: { data: "desc" },
+                    });
+                    if (ultimoPagamento) {
+                        await prisma.pix_Pagamento.update({
+                            where: { id: ultimoPagamento.id },
+                            data: { valorBonus: resultadoCalculo.bonus },
+                        });
+                    }
+                }
+                catch (error) {
+                    console.error("Erro ao registrar bônus no pagamento:", error);
+                }
+            }
         }
         else {
-            pulsosFormatados = "0000";
-            console.log("Máquina não encontrada");
         }
-        return res.status(200).json({ "retorno": pulsosFormatados });
+        return res.status(200).json({ retorno: pulsosFormatados });
     }
     catch (err) {
-        console.log(err);
-        return res.status(500).json({ "retorno": "0000" });
+        console.log(`
+🔥 ERRO NA CONSULTA
+🆔 ID: ${req.params.id}
+📶 Sinal: ${req.query.nivelDeSinal}
+❌ ${err.message}
+`);
+        return res.status(500).json({ retorno: "0000" });
+    }
+    finally {
+        espInFlight.delete(req.params.id);
     }
 });
 //SIMULA UM CRÉDITO REMOTO
@@ -1468,7 +1823,7 @@ app.post("/credito-remoto", verifyJwtPessoa, async (req, res) => {
             }
             //VERIFICAR SE A MAQUINA ESTA ONINE
             if (maquina.ultimaRequisicao) {
-                var status = (tempoOffline(new Date(maquina.ultimaRequisicao))) > 60 ? "OFFLINE" : "ONLINE";
+                var status = (tempoOffline(maquina.ultimaRequisicao)) > 60 ? "OFFLINE" : "ONLINE";
                 console.log(status);
                 if (status == "OFFLINE") {
                     return res.status(400).json({ "msg": "MÁQUINA OFFLINE!" });
@@ -1482,8 +1837,9 @@ app.post("/credito-remoto", verifyJwtPessoa, async (req, res) => {
                     id: req.body.id
                 },
                 data: {
-                    valorDoPix: req.body.valor,
-                    ultimoPagamentoRecebido: new Date(Date.now())
+                    valorDoPix: String(req.body.valor),
+                    metodoPagamento: "REMOTO",
+                    ultimoPagamentoRecebido: new Date()
                 }
             });
             //registrando quem fez o crédito remoto
@@ -1536,7 +1892,7 @@ app.post("/credito-remoto-cliente", verifyJWT, async (req, res) => {
             }
             //VERIFICAR SE A MAQUINA ESTA ONINE
             if (maquina.ultimaRequisicao) {
-                var status = (tempoOffline(new Date(maquina.ultimaRequisicao))) > 60 ? "OFFLINE" : "ONLINE";
+                var status = tempoOffline(maquina.ultimaRequisicao) > 60 ? "OFFLINE" : "ONLINE";
                 console.log(status);
                 if (status == "OFFLINE") {
                     return res.status(400).json({ "msg": "MÁQUINA OFFLINE!" });
@@ -1672,76 +2028,151 @@ app.post("/login-cliente", async (req, res) => {
     }
 });
 //maquinas exibir as máquinas de um cliente logado
+// 🔥 CACHE GLOBAL
+const cache = {};
+const cacheTime = {};
 app.get("/maquinas", verifyJWT, async (req, res) => {
-    console.log(`${req.userId} acessou a rota que busca todos as máquinas.`);
+    const userId = req.userId;
     try {
+        const agora = Date.now();
+        // 🔥 CACHE 30s
+        if (cache[userId] && (agora - cacheTime[userId]) < 30000) {
+            console.log("⚡ usando cache");
+            return res.status(200).json(cache[userId]);
+        }
+        console.log("🔄 buscando do banco");
+        // 🔥 BUSCA MÁQUINAS
         const maquinas = await prisma.pix_Maquina.findMany({
-            where: {
-                clienteId: req.userId,
-            },
-            orderBy: {
-                dataInclusao: 'desc', // 'asc' para ordenação ascendente, 'desc' para ordenação descendente.
-            },
+            where: { clienteId: userId },
+            orderBy: { dataInclusao: "asc" }
         });
-        if (maquinas != null) {
-            console.log("encontrou");
-            const maquinasComStatus = [];
-            for (const maquina of maquinas) {
-                // 60 segundos sem acesso máquina já fica offline
-                if (maquina.ultimaRequisicao) {
-                    var status = (tempoOffline(new Date(maquina.ultimaRequisicao))) > 60 ? "OFFLINE" : "ONLINE";
-                    //60 segundos x 30 = 1800 segundos (meia hora pagamento mais recente)
-                    if (status == "ONLINE" && maquina.ultimoPagamentoRecebido && tempoOffline(new Date(maquina.ultimoPagamentoRecebido)) < 1800) {
-                        status = "PAGAMENTO_RECENTE";
-                    }
-                    maquinasComStatus.push({
-                        id: maquina.id,
-                        pessoaId: maquina.pessoaId,
-                        clienteId: maquina.clienteId,
-                        nome: maquina.nome,
-                        descricao: maquina.descricao,
-                        estoque: maquina.estoque,
-                        store_id: maquina.store_id,
-                        maquininha_serial: maquina.maquininha_serial,
-                        valorDoPix: maquina.valorDoPix,
-                        dataInclusao: maquina.dataInclusao,
-                        ultimoPagamentoRecebido: maquina.ultimoPagamentoRecebido,
-                        ultimaRequisicao: maquina.ultimaRequisicao,
-                        status: status,
-                        pulso: maquina.valorDoPulso,
-                        nivelDeSinal: maquina.nivelDeSinal
-                    });
+        if (!maquinas.length) {
+            return res.status(200).json([]);
+        }
+        const maquinaIds = maquinas.map((m) => m.id);
+        const parseValorPagamento = (raw) => {
+            if (raw === null || raw === undefined)
+                return 0;
+            let s = String(raw).trim();
+            if (!s)
+                return 0;
+            s = s.replace(/^R\$\s*/i, "").replace(/\s/g, "");
+            if (s.includes(",")) {
+                s = s.replace(/\./g, "").replace(",", ".");
+            }
+            else {
+                const dotMatches = s.match(/\./g) || [];
+                if (dotMatches.length > 1) {
+                    s = s.replace(/\./g, "");
                 }
-                else {
-                    maquinasComStatus.push({
-                        id: maquina.id,
-                        pessoaId: maquina.pessoaId,
-                        clienteId: maquina.clienteId,
-                        nome: maquina.nome,
-                        descricao: maquina.descricao,
-                        estoque: maquina.estoque,
-                        store_id: maquina.store_id,
-                        maquininha_serial: maquina.maquininha_serial,
-                        valorDoPix: maquina.valorDoPix,
-                        dataInclusao: maquina.dataInclusao,
-                        ultimoPagamentoRecebido: maquina.ultimoPagamentoRecebido,
-                        ultimaRequisicao: maquina.ultimaRequisicao,
-                        status: "OFFLINE",
-                        pulso: maquina.valorDoPulso,
-                        nivelDeSinal: maquina.nivelDeSinal
-                    });
+                else if (dotMatches.length === 1) {
+                    const parts = s.split(".");
+                    if (parts.length === 2 && parts[1].length === 3) {
+                        s = parts[0] + parts[1];
+                    }
                 }
             }
-            return res.status(200).json(maquinasComStatus);
-        }
-        else {
-            console.log("não encontrou");
-            return res.status(200).json("[]");
-        }
+            const n = Number.parseFloat(s);
+            return Number.isFinite(n) ? n : 0;
+        };
+        const offsetMinutes = -180;
+        const now = new Date();
+        const nowSP = new Date(now.getTime() + offsetMinutes * 60000);
+        const startSP = new Date(Date.UTC(nowSP.getUTCFullYear(), nowSP.getUTCMonth(), nowSP.getUTCDate(), 0, 0, 0));
+        const startUTC = new Date(startSP.getTime() - offsetMinutes * 60000);
+        const endUTC = new Date(startUTC.getTime() + 24 * 60 * 60 * 1000);
+        const startUTCOntem = new Date(startUTC.getTime() - 24 * 60 * 60 * 1000);
+        const endUTCOntem = startUTC;
+        const pagamentosHoje = await prisma.pix_Pagamento.findMany({
+            where: {
+                maquinaId: { in: maquinaIds },
+                estornado: false,
+                removido: false,
+                data: {
+                    gte: startUTC,
+                    lt: endUTC,
+                },
+            },
+            select: {
+                maquinaId: true,
+                valor: true,
+            },
+        });
+        const faturamentoMap = {};
+        pagamentosHoje.forEach((p) => {
+            const valor = parseValorPagamento(p.valor);
+            if (!faturamentoMap[p.maquinaId]) {
+                faturamentoMap[p.maquinaId] = 0;
+            }
+            faturamentoMap[p.maquinaId] += valor;
+        });
+        const pagamentosOntem = await prisma.pix_Pagamento.findMany({
+            where: {
+                maquinaId: { in: maquinaIds },
+                estornado: false,
+                removido: false,
+                data: {
+                    gte: startUTCOntem,
+                    lt: endUTCOntem,
+                },
+            },
+            select: {
+                maquinaId: true,
+                valor: true,
+            },
+        });
+        const faturamentoOntemMap = {};
+        pagamentosOntem.forEach((p) => {
+            const valor = parseValorPagamento(p.valor);
+            if (!faturamentoOntemMap[p.maquinaId]) {
+                faturamentoOntemMap[p.maquinaId] = 0;
+            }
+            faturamentoOntemMap[p.maquinaId] += valor;
+        });
+        // 🔥 MONTA RESPOSTA
+        const maquinasComStatus = maquinas.map((maquina) => {
+            let status = "OFFLINE";
+            if (maquina.ultimaRequisicao) {
+                status =
+                    tempoOffline(new Date(maquina.ultimaRequisicao)) > 60
+                        ? "OFFLINE"
+                        : "ONLINE";
+                if (status === "ONLINE" &&
+                    maquina.ultimoPagamentoRecebido &&
+                    tempoOffline(new Date(maquina.ultimoPagamentoRecebido)) < 1800) {
+                    status = "PAGAMENTO_RECENTE";
+                }
+            }
+            return {
+                id: maquina.id,
+                nome: maquina.nome,
+                status,
+                faturamentoHoje: faturamentoMap[maquina.id] || 0,
+                faturamentoOntem: faturamentoOntemMap[maquina.id] || 0,
+                maquinaId: maquina.maquininha_serial,
+                pessoaId: maquina.pessoaId,
+                clienteId: maquina.clienteId,
+                descricao: maquina.descricao,
+                estoque: maquina.estoque,
+                store_id: maquina.store_id,
+                valorDoPix: maquina.valorDoPix,
+                dataInclusao: maquina.dataInclusao,
+                ultimoPagamentoRecebido: maquina.ultimoPagamentoRecebido,
+                ultimaRequisicao: maquina.ultimaRequisicao,
+                pulso: maquina.valorDoPulso,
+                nivelDeSinal: maquina.nivelDeSinal,
+                bonusAtivo: maquina.bonusAtivo,
+                bonusRegras: maquina.bonusRegras,
+            };
+        });
+        // 🔥 SALVA CACHE
+        cache[userId] = maquinasComStatus;
+        cacheTime[userId] = agora;
+        return res.status(200).json(maquinasComStatus);
     }
     catch (err) {
-        console.log(err);
-        return res.status(500).json({ "retorno": "ERRO" });
+        console.error(err);
+        return res.status(500).json({ erro: "erro" });
     }
 });
 app.get("/maquinas-adm", verifyJwtPessoa, async (req, res) => {
@@ -1780,7 +2211,9 @@ app.get("/maquinas-adm", verifyJwtPessoa, async (req, res) => {
                         ultimaRequisicao: maquina.ultimaRequisicao,
                         status: status,
                         pulso: maquina.valorDoPulso,
-                        nivelDeSinal: maquina.nivelDeSinal
+                        nivelDeSinal: maquina.nivelDeSinal,
+                        bonusAtivo: maquina.bonusAtivo,
+                        bonusRegras: maquina.bonusRegras
                     });
                 }
                 else {
@@ -1799,7 +2232,9 @@ app.get("/maquinas-adm", verifyJwtPessoa, async (req, res) => {
                         ultimaRequisicao: maquina.ultimaRequisicao,
                         status: "OFFLINE",
                         pulso: maquina.valorDoPulso,
-                        nivelDeSinal: maquina.nivelDeSinal
+                        nivelDeSinal: maquina.nivelDeSinal,
+                        bonusAtivo: maquina.bonusAtivo,
+                        bonusRegras: maquina.bonusRegras
                     });
                 }
             }
@@ -2006,433 +2441,751 @@ async function verificarRegistroExistente(mercadoPagoId, maquinaId) {
 //esse id é o do cliente e NÃO DA máquina.
 //EXEMPLO:
 //https://api-v3-ddd5b551a51f.herokuapp.com/rota-recebimento-mercado-pago-dinamica/a803e2f8-7045-4ae8-a387-517ae844c965
+// app.post("/rota-recebimento-mercado-pago-dinamica/:id", async (req: any, res: any) => {
+//   try {
+//     //teste de chamada do Mercado Pago
+//     if (req.query.id === "123456") {
+//       return res.status(200).json({ "status": "ok" });
+//     }
+//     var valor = 0.00;
+//     var tipoPagamento = ``;
+//     var taxaDaOperacao = ``;
+//     var cliId = ``;
+//     var str_id = "";
+//     var mensagem = `MÁQUINA NÃO POSSUI store_id CADASTRADO > 
+//     ALTERE O store_id dessa máquina para ${str_id} para poder receber pagamentos nela...`;
+//     var statusPagamento = ``;
+//     console.log("Novo pix do Mercado Pago:");
+//     console.log(req.body);
+//     console.log("id");
+//     console.log(req.query.id);
+//     const { resource, topic } = req.body;
+//     // Exibe os valores capturados
+//     console.log('Resource:', resource);
+//     console.log('Topic:', topic);
+//     var url = "https://api.mercadopago.com/v1/payments/" + req.query.id;
+//     var tokenCliente = "";
+//     var external_reference = "";
+//     //buscar token do cliente no banco de dados:
+//     const cliente = await prisma.pix_Cliente.findUnique({
+//       where: {
+//         id: req.params.id,
+//       }
+//     });
+//     tokenCliente = (cliente?.mercadoPagoToken == undefined) ? "" : cliente?.mercadoPagoToken;
+//     cliId = (cliente?.id == undefined) ? "" : cliente?.id;
+//     if (tokenCliente) {
+//       console.log("token obtido.");
+//     }
+//     console.log("Cliente ativo:");
+//     console.log(cliente?.ativo);
+//     axios.get(url, { headers: { Authorization: `Bearer ${tokenCliente}` } })
+//       .then(async (response: {
+//         data: {
+//           store_id: string; transaction_amount: number; status: string,
+//           payment_type_id: string, fee_details: any, external_reference: string
+//         };
+//       }) => {
+//         console.log('store_id', response.data.store_id);
+//         str_id = response.data.store_id;
+//         console.log('storetransaction_amount_id', response.data.transaction_amount);
+//         console.log('payment_method_id', response.data.payment_type_id);
+//         console.log('status ' + response.data.status);
+//         statusPagamento = response.data.status;
+//         valor = response.data.transaction_amount;
+//         tipoPagamento = response.data.payment_type_id;
+//         external_reference = response.data.external_reference;
+//         if (response.data.fee_details && Array.isArray(response.data.fee_details) && response.data.fee_details.length > 0) {
+//           console.log('Amount:', response.data.fee_details[0].amount);
+//           taxaDaOperacao = response.data.fee_details[0].amount + "";
+//         }
+//         //BUSCAR QUAL MÁQUINA ESTÁ SENDO UTILIZADA (store_id)
+//         const maquina = await prisma.pix_Maquina.findFirst({
+//           where: {
+//             store_id: str_id,
+//             clienteId: req.params.id
+//           },
+//           include: {
+//             cliente: true,
+//           },
+//         });
+//         console.log("store id trazido pelo Mercado Pago...");
+//         console.log(str_id);
+//         //PROCESSAR O PAGAMENTO (se eu tiver uma máquina com store_id cadastrado)
+//         if (maquina && maquina.store_id && maquina.store_id.length > 0) {
+//           console.log(`recebendo pagamento na máquina: ${maquina.nome} - store_id: ${maquina.store_id}`)
+//           //VERIFICANDO SE A MÁQUINA PERTENCE A UM CIENTE ATIVO 
+//           if (cliente != null) {
+//             if (cliente !== null && cliente !== undefined) {
+//               if (cliente.ativo) {
+//                 console.log("Cliente ativo - seguindo...");
+//                 //VERIFICAÇÃO DA DATA DE VENCIMENTO:
+//                 if (cliente.dataVencimento) {
+//                   if (cliente.dataVencimento != null) {
+//                     console.log("verificando inadimplência...");
+//                     const dataVencimento: Date = cliente.dataVencimento;
+//                     const dataAtual = new Date();
+//                     const diferencaEmMilissegundos = dataAtual.getTime() - dataVencimento.getTime();
+//                     const diferencaEmDias = Math.floor(diferencaEmMilissegundos / (1000 * 60 * 60 * 24));
+//                     console.log(diferencaEmDias);
+//                     if (diferencaEmDias > 10) {
+//                       console.log("Cliente MENSALIDADE atrasada - estornando...");
+//                       //EVITAR ESTORNO DUPLICADO
+//                       const registroExistente = await prisma.pix_Pagamento.findFirst({
+//                         where: {
+//                           mercadoPagoId: req.query.id,
+//                           estornado: true,
+//                           clienteId: req.params.id
+//                         },
+//                       });
+//                       if (registroExistente) {
+//                         console.log("Esse estorno ja foi feito...");
+//                         return res.status(200).json({ "retorno": "error.. cliente ATRASADO - mais de 10 dias sem pagamento!" });
+//                       } else {
+//                         console.log("Seguindo...");
+//                       }
+//                       //FIM EVITANDO ESTORNO DUPLICADO
+//                       estornarMP(req.query.id, tokenCliente, "mensalidade com atraso");
+//                       //REGISTRAR O PAGAMENTO
+//                       const novoPagamento = await prisma.pix_Pagamento.create({
+//                         data: {
+//                           maquinaId: maquina.id,
+//                           valor: valor.toString(),
+//                           mercadoPagoId: req.query.id,
+//                           motivoEstorno: `01- mensalidade com atraso. str_id: ${str_id}`,
+//                           estornado: true,
+//                         },
+//                       });
+//                       return res.status(200).json({ "retorno": "error.. cliente ATRASADO - mais de 10 dias sem pagamento!" });
+//                     }
+//                   }
+//                   else {
+//                     console.log("pulando etapa de verificar inadimplência... campo dataVencimento não cadastrado ou nulo!")
+//                   }
+//                 }
+//                 //FIM VERIFICAÇÃO VENCIMENTO
+//               } else {
+//                 console.log("Cliente inativo - estornando...");
+//                 //EVITAR ESTORNO DUPLICADO
+//                 const registroExistente = await prisma.pix_Pagamento.findFirst({
+//                   where: {
+//                     mercadoPagoId: req.query.id,
+//                     estornado: true,
+//                     clienteId: req.params.id
+//                   },
+//                 });
+//                 if (registroExistente) {
+//                   console.log("Esse estorno ja foi feito...");
+//                   return res.status(200).json({ "retorno": "error.. cliente ATRASADO - mais de 10 dias sem pagamento!" });
+//                 } else {
+//                   console.log("Seguindo...");
+//                 }
+//                 //FIM EVITANDO ESTORNO DUPLICADO
+//                 estornarMP(req.query.id, tokenCliente, "cliente inativo");
+//                 //REGISTRAR O PAGAMENTO
+//                 const novoPagamento = await prisma.pix_Pagamento.create({
+//                   data: {
+//                     maquinaId: maquina.id,
+//                     valor: valor.toString(),
+//                     mercadoPagoId: req.query.id,
+//                     motivoEstorno: `02- cliente inativo. str_id: ${str_id}`,
+//                     estornado: true,
+//                   },
+//                 });
+//                 return res.status(200).json({ "retorno": "error.. cliente INATIVO - pagamento estornado!" });
+//               }
+//             } else {
+//               console.log("error.. cliente nulo ou não encontrado!");
+//               return res.status(200).json({ "retorno": "error.. cliente nulo ou não encontrado!" });
+//             }
+//           }
+//           //FIM VERIFICAÇÃO DE CLIENTE ATIVO.
+//           //VERIFICANDO SE A MÁQUINA ESTÁ OFFLINE 
+//           if (maquina.ultimaRequisicao instanceof Date) {
+//             const diferencaEmSegundos = tempoOffline(maquina.ultimaRequisicao);
+//             if (diferencaEmSegundos > 60) {
+//               console.log("estornando... máquina offline.");
+//               //EVITAR ESTORNO DUPLICADO
+//               const registroExistente = await prisma.pix_Pagamento.findFirst({
+//                 where: {
+//                   mercadoPagoId: req.query.id,
+//                   estornado: true,
+//                 },
+//               });
+//               if (registroExistente) {
+//                 console.log("Esse estorno ja foi feito...");
+//                 return res.status(200).json({ "retorno": "error.. cliente ATRASADO - mais de 10 dias sem pagamento!" });
+//               } else {
+//                 console.log("Seguindo...");
+//               }
+//               //FIM EVITANDO ESTORNO DUPLICADO
+//               estornarMP(req.query.id, tokenCliente, "máquina offline");
+//               //evitando duplicidade de estorno:
+//               const estornos = await prisma.pix_Pagamento.findMany({
+//                 where: {
+//                   mercadoPagoId: req.query.id,
+//                   estornado: true,
+//                   clienteId: req.params.id
+//                 },
+//               });
+//               if (estornos) {
+//                 if (estornos.length > 0) {
+//                   return res.status(200).json({ "retorno": "PAGAMENTO JÁ ESTORNADO! - MÁQUINA OFFLINE" });
+//                 }
+//               }
+//               //FIM envitando duplicidade de estorno
+//               //REGISTRAR ESTORNO
+//               const novoPagamento = await prisma.pix_Pagamento.create({
+//                 data: {
+//                   maquinaId: maquina.id,
+//                   valor: valor.toString(),
+//                   mercadoPagoId: req.query.id,
+//                   motivoEstorno: `03- máquina offline. str_id: ${str_id}`,
+//                   estornado: true,
+//                 },
+//               });
+//               return res.status(200).json({ "retorno": "PAGAMENTO ESTORNADO - MÁQUINA OFFLINE" });
+//             }
+//           } else {
+//             console.log("estornando... máquina offline.");
+//             //EVITAR ESTORNO DUPLICADO
+//             const registroExistente = await prisma.pix_Pagamento.findFirst({
+//               where: {
+//                 mercadoPagoId: req.query.id,
+//                 estornado: true,
+//                 clienteId: req.params.id
+//               },
+//             });
+//             if (registroExistente) {
+//               console.log("Esse estorno ja foi feito...");
+//               return res.status(200).json({ "retorno": "error.. cliente ATRASADO - mais de 10 dias sem pagamento!" });
+//             } else {
+//               console.log("Seguindo...");
+//             }
+//             //FIM EVITANDO ESTORNO DUPLICADO
+//             estornarMP(req.query.id, tokenCliente, "máquina offline");
+//             //REGISTRAR O PAGAMENTO
+//             const novoPagamento = await prisma.pix_Pagamento.create({
+//               data: {
+//                 maquinaId: maquina.id,
+//                 valor: valor.toString(),
+//                 mercadoPagoId: req.query.id,
+//                 motivoEstorno: `04- máquina offline. str_id: ${str_id}`,
+//                 estornado: true,
+//               },
+//             });
+//             return res.status(200).json({ "retorno": "PAGAMENTO ESTORNADO - MÁQUINA OFFLINE" });
+//           }
+//           //FIM VERIFICAÇÃO MÁQUINA OFFLINE
+//           const limiteNaoAceito = 300;
+//           if (valor >= limiteNaoAceito) {
+//             const registroExistente = await prisma.pix_Pagamento.findFirst({
+//               where: {
+//                 mercadoPagoId: req.query.id,
+//                 estornado: true,
+//                 clienteId: req.params.id
+//               },
+//             });
+//             if (!registroExistente) {
+//               estornarMP(req.query.id, tokenCliente, "valor não aceito (>= 300)");
+//               await prisma.pix_Pagamento.create({
+//                 data: {
+//                   maquinaId: maquina.id,
+//                   valor: valor.toString(),
+//                   mercadoPagoId: req.query.id,
+//                   motivoEstorno: `06- valor não aceito (>= 300). str_id: ${str_id}`,
+//                   estornado: true,
+//                   clienteId: cliId
+//                 },
+//               });
+//             }
+//             return res.status(200).json({ "retorno": `PAGAMENTO ESTORNADO - VALOR NÃO ACEITO (>= R$: ${limiteNaoAceito})` });
+//           }
+//           //VERIFICAR SE O VALOR PAGO É MAIOR QUE O VALOR MÍNIMO
+//           const valorMinimo = parseFloat(maquina.valorDoPulso);
+//           if (valor < valorMinimo) {
+//             console.log("iniciando estorno...")
+//             //EVITAR ESTORNO DUPLICADO
+//             const registroExistente = await prisma.pix_Pagamento.findFirst({
+//               where: {
+//                 mercadoPagoId: req.query.id,
+//                 estornado: true,
+//                 clienteId: req.params.id
+//               },
+//             });
+//             if (registroExistente) {
+//               console.log("Esse estorno ja foi feito...");
+//               return res.status(200).json({ "retorno": "error.. cliente ATRASADO - mais de 10 dias sem pagamento!" });
+//             } else {
+//               console.log("Seguindo...");
+//             }
+//             //FIM EVITANDO ESTORNO DUPLICADO
+//             //REGISTRAR O PAGAMENTO
+//             const novoPagamento = await prisma.pix_Pagamento.create({
+//               data: {
+//                 maquinaId: maquina.id,
+//                 valor: valor.toString(),
+//                 mercadoPagoId: req.query.id,
+//                 motivoEstorno: `05- valor inferior ao mínimo. str_id: ${str_id}`,
+//                 estornado: true,
+//               },
+//             });
+//             console.log("estornando valor inferior ao mínimo...");
+//             estornarMP(req.query.id, tokenCliente, "valor inferior ao mínimo");
+//             return res.status(200).json({
+//               "retorno": `PAGAMENTO ESTORNADO - INFERIOR AO VALOR 
+//             MÍNIMO DE R$: ${valorMinimo} PARA ESSA MÁQUINA.`
+//             });
+//           } else {
+//             console.log("valor permitido finalizando operação...");
+//           }
+//           //VERIFICAR SE ESSE PAGAMENTO JÁ FOI EFETUADO
+//           const registroExistente = await prisma.pix_Pagamento.findFirst({
+//             where: {
+//               mercadoPagoId: req.query.id,
+//               clienteId: req.params.id
+//             },
+//           });
+//           if (registroExistente) {
+//             console.log("Esse pagamento ja foi feito...");
+//             return res.status(200).json({ "retorno": "error.. Duplicidade de pagamento!" });
+//           } else {
+//             console.log("Seguindo...");
+//           }
+//           //VERIFICAR SE ESSE PAGAMENTO JÁ FOI EFETUADO
+//           // promise para aguardar
+//           const esperar = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
+//           const verificaPagamento = async (
+//             url: string,
+//             tokenCliente: string
+//           ): Promise<VerificaPagamentoResult> => {
+//             try {
+//               const response = await axios.get(url, {
+//                 headers: { Authorization: `Bearer ${tokenCliente}` },
+//               });
+//               const status: string = response.data.status;
+//               const valido: boolean = status === "approved";
+//               return { status, valido };
+//             } catch (error: unknown) {
+//               if (error instanceof Error) {
+//                 console.error("Erro ao verificar pagamento:", error.message);
+//               } else {
+//                 console.error("Erro desconhecido ao verificar pagamento:", error);
+//               }
+//               return { status: null, valido: false };
+//             }
+//           };
+//           await esperar(10000);
+//           const resultado = await verificaPagamento(url, tokenCliente);
+//           if (!resultado.valido) {
+//             console.log("Pagamento não realizado");
+//             return res.status(200).json({ "retorno": "error.. Status do pagamento : " + resultado.status });
+//           }
+//           //ATUALIZAR OS DADOS DA MÁQUINA QUE ESTAMOS RECEBENDO O PAGAMENTO
+//           await prisma.pix_Maquina.update({
+//             where: {
+//               id: maquina.id,
+//             },
+//             data: {
+//               valorDoPix: valor.toString(),
+//               ultimoPagamentoRecebido: new Date(Date.now())
+//             }
+//           });
+//           //REGISTRAR O PAGAMENTO
+//           const novoPagamento = await prisma.pix_Pagamento.create({
+//             data: {
+//               maquinaId: maquina.id,
+//               valor: valor.toString(),
+//               mercadoPagoId: req.query.id,
+//               motivoEstorno: ``,
+//               tipo: tipoPagamento,
+//               taxas: taxaDaOperacao,
+//               clienteId: cliId,
+//               estornado: false,
+//               operadora: `Mercado Pago`
+//             },
+//           });
+//           if (NOTIFICACOES_PAGAMENTOS) {
+//             notificarDiscord(DISCORD_WEBHOOKS.PAGAMENTOS, `Novo pagamento recebido no Mercado Pago. R$: ${valor.toString()}`, `Cliente ${cliente?.nome} Maquina: ${maquina?.nome}. Maquina: ${maquina?.descricao}`)
+//           }
+//           console.log('Pagamento inserido com sucesso:', novoPagamento);
+//           return res.status(200).json(novoPagamento);
+//         } else {
+//           //PROCESSAMENTO DE EVENTOS QUE NÃO SAO PAYMENTS DE LOJAS E CAIXAS
+//           // Buscar na tabela cobranças se existe um registro com external_reference igual ao ID
+//           const cobrancaExistente = await prisma.pix_Cobranca.findUnique({
+//             where: { id: external_reference },
+//           });
+//           if (cobrancaExistente && cobrancaExistente.dataDePagamento == null &&
+//             statusPagamento == 'approved') {
+//             console.log("Processar pagamento do cliente, renovação de mensalidade");
+//             const clientePagador = cobrancaExistente.clienteId;
+//             // Atualizar a data de vencimento do cliente para a data de renovação da cobrança
+//             await prisma.pix_Cliente.update({
+//               where: { id: clientePagador },
+//               data: { dataVencimento: cobrancaExistente.dataDeRenovacao },
+//             });
+//             console.log("Data de vencimento do cliente atualizada para: ", cobrancaExistente.dataDeRenovacao);
+//             if (cobrancaExistente.isVencido) {
+//               // Recuperar parcelas em atraso e marcá-las como PAGO
+//               const parcelasAtualizadas = await prisma.pix_PagamentoCliente.updateMany({
+//                 where: {
+//                   clienteId: clientePagador,
+//                   dataDeVencimento: { lt: new Date() },
+//                   status: { not: 'PAGO' },
+//                 },
+//                 data: {
+//                   status: 'PAGO',
+//                   dataDoPagamento: new Date(),
+//                 },
+//               });
+//               if (parcelasAtualizadas) {
+//                 console.log("Houve parcelas com débitos atualizadas.");
+//               }
+//             } else {
+//               console.log("Cliente não tem atrasos, atualizando próxima cobrança em aberto.");
+//               // Procurar a próxima parcela com status ABERTO e atualizá-la para PAGO
+//               const proximaParcela = await prisma.pix_PagamentoCliente.findFirst({
+//                 where: {
+//                   clienteId: clientePagador,
+//                   status: 'ABERTO',
+//                 },
+//                 orderBy: {
+//                   dataDeVencimento: 'asc',
+//                 },
+//               });
+//               if (proximaParcela) {
+//                 await prisma.pix_PagamentoCliente.update({
+//                   where: { id: proximaParcela.id },
+//                   data: {
+//                     status: 'PAGO',
+//                     dataDoPagamento: new Date(),
+//                   },
+//                 });
+//                 console.log("Próxima parcela com status ABERTO atualizada para PAGO.");
+//               } else {
+//                 console.log("Nenhuma próxima parcela com status ABERTO encontrada.");
+//               }
+//             }
+//             // Atualizar a data de pagamento da cobrança.
+//             await prisma.pix_Cobranca.update({
+//               where: { id: cobrancaExistente.id },
+//               data: { dataDePagamento: new Date() },
+//             });
+//             console.log(mensagem);
+//             return res.status(200).json({ "retorno": mensagem });
+//           }
+//         }
+//       }).catch((error: any) => {
+//         console.error('Erro ao processar pagamento, verifique se o token está cadastrado:', error);
+//         // Aqui você pode adicionar qualquer lógica ou retorno desejado em caso de erro.
+//         return res.status(500).json({ error: `${error.message}` });
+//       });
+//   } catch (error) {
+//     console.error(error);
+//     return res.status(402).json({ "error": "error: " + error });
+//   }
+// });
 app.post("/rota-recebimento-mercado-pago-dinamica/:id", async (req, res) => {
+    let paymentId = "";
+    let pagamentoProcessado = false;
+    let tokenClienteGlobal = "";
     try {
-        //teste de chamada do Mercado Pago
-        if (req.query.id === "123456") {
-            return res.status(200).json({ "status": "ok" });
+        console.log("📩 Webhook recebido:", JSON.stringify(req.body));
+        // ================================
+        // 1. PAYMENT ID
+        // ================================
+        paymentId =
+            req.body?.data?.id ||
+                req.body?.resource ||
+                req.query?.id;
+        if (!paymentId)
+            return res.status(200).end();
+        console.log("🧾 Payment ID:", paymentId);
+        // ================================
+        // 2. ANTI-FLOOD
+        // ================================
+        if (processandoWebhooks.has(paymentId)) {
+            console.log("⚠️ Duplicado:", paymentId);
+            return res.status(200).end();
         }
-        var valor = 0.00;
-        var tipoPagamento = ``;
-        var taxaDaOperacao = ``;
-        var cliId = ``;
-        var str_id = "";
-        var mensagem = `MÁQUINA NÃO POSSUI store_id CADASTRADO > 
-    ALTERE O store_id dessa máquina para ${str_id} para poder receber pagamentos nela...`;
-        var statusPagamento = ``;
-        console.log("Novo pix do Mercado Pago:");
-        console.log(req.body);
-        console.log("id");
-        console.log(req.query.id);
-        const { resource, topic } = req.body;
-        // Exibe os valores capturados
-        console.log('Resource:', resource);
-        console.log('Topic:', topic);
-        var url = "https://api.mercadopago.com/v1/payments/" + req.query.id;
-        var tokenCliente = "";
-        var external_reference = "";
-        //buscar token do cliente no banco de dados:
+        processandoWebhooks.add(paymentId);
+        // ================================
+        // 3. CLIENTE
+        // ================================
         const cliente = await prisma.pix_Cliente.findUnique({
+            where: { id: req.params.id }
+        });
+        if (!cliente) {
+            processandoWebhooks.delete(paymentId);
+            return res.status(200).end();
+        }
+        const tokenCliente = cliente.mercadoPagoToken || "";
+        tokenClienteGlobal = tokenCliente;
+        if (!tokenCliente) {
+            console.log("❌ Cliente sem token");
+            processandoWebhooks.delete(paymentId);
+            return res.status(200).end();
+        }
+        // ================================
+        // 4. CONSULTAR MP
+        // ================================
+        const url = `https://api.mercadopago.com/v1/payments/${paymentId}`;
+        let data;
+        try {
+            const response = await axios_1.default.get(url, {
+                headers: { Authorization: `Bearer ${tokenCliente}` },
+                timeout: 5000
+            });
+            data = response.data;
+        }
+        catch (error) {
+            if (error.response?.status === 401) {
+                console.log("🚫 Token inválido");
+                processandoWebhooks.delete(paymentId);
+                return res.status(200).end();
+            }
+            processandoWebhooks.delete(paymentId);
+            return res.status(200).end();
+        }
+        // ================================
+        // 5. VALIDAR STATUS
+        // ================================
+        if (data.status !== "approved") {
+            console.log("⏳ Não aprovado:", data.status);
+            processandoWebhooks.delete(paymentId);
+            return res.status(200).end();
+        }
+        const store_id = data.store_id;
+        const valor = data.transaction_amount;
+        const tipoPagamento = data.payment_type_id;
+        // 🔥 TAXA
+        let taxa = "0";
+        if (data.fee_details && data.fee_details.length > 0) {
+            taxa = data.fee_details[0].amount.toString();
+        }
+        console.log("📊 RESUMO:", {
+            paymentId,
+            store_id,
+            valor,
+            tipoPagamento,
+            taxa
+        });
+        // ================================
+        // 6. BUSCAR MÁQUINA
+        // ================================
+        const maquina = await prisma.pix_Maquina.findFirst({
             where: {
-                id: req.params.id,
+                store_id: store_id
+            },
+            include: {
+                cliente: true
             }
         });
-        tokenCliente = (cliente?.mercadoPagoToken == undefined) ? "" : cliente?.mercadoPagoToken;
-        cliId = (cliente?.id == undefined) ? "" : cliente?.id;
-        if (tokenCliente) {
-            console.log("token obtido.");
+        if (!maquina) {
+            console.log(`
+⚠️ MÁQUINA NÃO ENCONTRADA → IGNORADO
+🧾 Payment: ${paymentId}
+🏪 Store_id: ${store_id}
+🕒 ${new Date().toISOString()}
+`);
+            // 🔥 IMPORTANTE: evita reprocessar esse webhook
+            processandoWebhooks.delete(paymentId);
+            return res.status(200).end();
         }
-        console.log("Cliente ativo:");
-        console.log(cliente?.ativo);
-        axios_1.default.get(url, { headers: { Authorization: `Bearer ${tokenCliente}` } })
-            .then(async (response) => {
-            console.log('store_id', response.data.store_id);
-            str_id = response.data.store_id;
-            console.log('storetransaction_amount_id', response.data.transaction_amount);
-            console.log('payment_method_id', response.data.payment_type_id);
-            console.log('status ' + response.data.status);
-            statusPagamento = response.data.status;
-            valor = response.data.transaction_amount;
-            tipoPagamento = response.data.payment_type_id;
-            external_reference = response.data.external_reference;
-            if (response.data.fee_details && Array.isArray(response.data.fee_details) && response.data.fee_details.length > 0) {
-                console.log('Amount:', response.data.fee_details[0].amount);
-                taxaDaOperacao = response.data.fee_details[0].amount + "";
-            }
-            //BUSCAR QUAL MÁQUINA ESTÁ SENDO UTILIZADA (store_id)
-            const maquina = await prisma.pix_Maquina.findFirst({
+        // ================================
+        // 7. MÁQUINA OFFLINE
+        // ================================
+        let status = "ONLINE";
+        if (maquina.ultimaRequisicao) {
+            status =
+                tempoOffline(new Date(maquina.ultimaRequisicao)) > MAQUINA_OFFLINE_ESTORNO_SEGUNDOS
+                    ? "OFFLINE"
+                    : "ONLINE";
+        }
+        else {
+            status = "OFFLINE";
+        }
+        if (status == "OFFLINE") {
+            console.log("🔌 Máquina offline → estorno");
+            const jaEstornado = await prisma.pix_Pagamento.findFirst({
                 where: {
-                    store_id: str_id,
-                    clienteId: req.params.id
-                },
-                include: {
-                    cliente: true,
-                },
+                    mercadoPagoId: paymentId,
+                    estornado: true
+                }
             });
-            console.log("store id trazido pelo Mercado Pago...");
-            console.log(str_id);
-            //PROCESSAR O PAGAMENTO (se eu tiver uma máquina com store_id cadastrado)
-            if (maquina && maquina.store_id && maquina.store_id.length > 0) {
-                console.log(`recebendo pagamento na máquina: ${maquina.nome} - store_id: ${maquina.store_id}`);
-                //VERIFICANDO SE A MÁQUINA PERTENCE A UM CIENTE ATIVO 
-                if (cliente != null) {
-                    if (cliente !== null && cliente !== undefined) {
-                        if (cliente.ativo) {
-                            console.log("Cliente ativo - seguindo...");
-                            //VERIFICAÇÃO DA DATA DE VENCIMENTO:
-                            if (cliente.dataVencimento) {
-                                if (cliente.dataVencimento != null) {
-                                    console.log("verificando inadimplência...");
-                                    const dataVencimento = cliente.dataVencimento;
-                                    const dataAtual = new Date();
-                                    const diferencaEmMilissegundos = dataAtual.getTime() - dataVencimento.getTime();
-                                    const diferencaEmDias = Math.floor(diferencaEmMilissegundos / (1000 * 60 * 60 * 24));
-                                    console.log(diferencaEmDias);
-                                    if (diferencaEmDias > 10) {
-                                        console.log("Cliente MENSALIDADE atrasada - estornando...");
-                                        //EVITAR ESTORNO DUPLICADO
-                                        const registroExistente = await prisma.pix_Pagamento.findFirst({
-                                            where: {
-                                                mercadoPagoId: req.query.id,
-                                                estornado: true,
-                                                clienteId: req.params.id
-                                            },
-                                        });
-                                        if (registroExistente) {
-                                            console.log("Esse estorno ja foi feito...");
-                                            return res.status(200).json({ "retorno": "error.. cliente ATRASADO - mais de 10 dias sem pagamento!" });
-                                        }
-                                        else {
-                                            console.log("Seguindo...");
-                                        }
-                                        //FIM EVITANDO ESTORNO DUPLICADO
-                                        estornarMP(req.query.id, tokenCliente, "mensalidade com atraso");
-                                        //REGISTRAR O PAGAMENTO
-                                        const novoPagamento = await prisma.pix_Pagamento.create({
-                                            data: {
-                                                maquinaId: maquina.id,
-                                                valor: valor.toString(),
-                                                mercadoPagoId: req.query.id,
-                                                motivoEstorno: `01- mensalidade com atraso. str_id: ${str_id}`,
-                                                estornado: true,
-                                            },
-                                        });
-                                        return res.status(200).json({ "retorno": "error.. cliente ATRASADO - mais de 10 dias sem pagamento!" });
-                                    }
-                                }
-                                else {
-                                    console.log("pulando etapa de verificar inadimplência... campo dataVencimento não cadastrado ou nulo!");
-                                }
-                            }
-                            //FIM VERIFICAÇÃO VENCIMENTO
-                        }
-                        else {
-                            console.log("Cliente inativo - estornando...");
-                            //EVITAR ESTORNO DUPLICADO
-                            const registroExistente = await prisma.pix_Pagamento.findFirst({
-                                where: {
-                                    mercadoPagoId: req.query.id,
-                                    estornado: true,
-                                    clienteId: req.params.id
-                                },
-                            });
-                            if (registroExistente) {
-                                console.log("Esse estorno ja foi feito...");
-                                return res.status(200).json({ "retorno": "error.. cliente ATRASADO - mais de 10 dias sem pagamento!" });
-                            }
-                            else {
-                                console.log("Seguindo...");
-                            }
-                            //FIM EVITANDO ESTORNO DUPLICADO
-                            estornarMP(req.query.id, tokenCliente, "cliente inativo");
-                            //REGISTRAR O PAGAMENTO
-                            const novoPagamento = await prisma.pix_Pagamento.create({
-                                data: {
-                                    maquinaId: maquina.id,
-                                    valor: valor.toString(),
-                                    mercadoPagoId: req.query.id,
-                                    motivoEstorno: `02- cliente inativo. str_id: ${str_id}`,
-                                    estornado: true,
-                                },
-                            });
-                            return res.status(200).json({ "retorno": "error.. cliente INATIVO - pagamento estornado!" });
-                        }
-                    }
-                    else {
-                        console.log("error.. cliente nulo ou não encontrado!");
-                        return res.status(200).json({ "retorno": "error.. cliente nulo ou não encontrado!" });
-                    }
+            if (!jaEstornado) {
+                await estornarMP(paymentId, tokenCliente, "maquina offline");
+            }
+            await prisma.pix_Pagamento.create({
+                data: {
+                    maquinaId: maquina.id,
+                    valor: valor.toString(),
+                    mercadoPagoId: paymentId,
+                    motivoEstorno: "maquina offline",
+                    estornado: true,
+                    clienteId: cliente.id
                 }
-                //FIM VERIFICAÇÃO DE CLIENTE ATIVO.
-                //VERIFICANDO SE A MÁQUINA ESTÁ OFFLINE 
-                if (maquina.ultimaRequisicao instanceof Date) {
-                    const diferencaEmSegundos = tempoOffline(maquina.ultimaRequisicao);
-                    if (diferencaEmSegundos > 60) {
-                        console.log("estornando... máquina offline.");
-                        //EVITAR ESTORNO DUPLICADO
-                        const registroExistente = await prisma.pix_Pagamento.findFirst({
-                            where: {
-                                mercadoPagoId: req.query.id,
-                                estornado: true,
-                            },
-                        });
-                        if (registroExistente) {
-                            console.log("Esse estorno ja foi feito...");
-                            return res.status(200).json({ "retorno": "error.. cliente ATRASADO - mais de 10 dias sem pagamento!" });
-                        }
-                        else {
-                            console.log("Seguindo...");
-                        }
-                        //FIM EVITANDO ESTORNO DUPLICADO
-                        estornarMP(req.query.id, tokenCliente, "máquina offline");
-                        //evitando duplicidade de estorno:
-                        const estornos = await prisma.pix_Pagamento.findMany({
-                            where: {
-                                mercadoPagoId: req.query.id,
-                                estornado: true,
-                                clienteId: req.params.id
-                            },
-                        });
-                        if (estornos) {
-                            if (estornos.length > 0) {
-                                return res.status(200).json({ "retorno": "PAGAMENTO JÁ ESTORNADO! - MÁQUINA OFFLINE" });
-                            }
-                        }
-                        //FIM envitando duplicidade de estorno
-                        //REGISTRAR ESTORNO
-                        const novoPagamento = await prisma.pix_Pagamento.create({
-                            data: {
-                                maquinaId: maquina.id,
-                                valor: valor.toString(),
-                                mercadoPagoId: req.query.id,
-                                motivoEstorno: `03- máquina offline. str_id: ${str_id}`,
-                                estornado: true,
-                            },
-                        });
-                        return res.status(200).json({ "retorno": "PAGAMENTO ESTORNADO - MÁQUINA OFFLINE" });
-                    }
+            });
+            processandoWebhooks.delete(paymentId);
+            return res.status(200).end();
+        }
+        // ================================
+        // 🔥 AGORA SIM: VALOR ALTO (250+)
+        // ================================
+        if (valor >= 250) {
+            console.log("💸 Valor alto → estorno");
+            const jaEstornado = await prisma.pix_Pagamento.findFirst({
+                where: {
+                    mercadoPagoId: paymentId,
+                    estornado: true
                 }
-                else {
-                    console.log("estornando... máquina offline.");
-                    //EVITAR ESTORNO DUPLICADO
-                    const registroExistente = await prisma.pix_Pagamento.findFirst({
-                        where: {
-                            mercadoPagoId: req.query.id,
-                            estornado: true,
-                            clienteId: req.params.id
-                        },
-                    });
-                    if (registroExistente) {
-                        console.log("Esse estorno ja foi feito...");
-                        return res.status(200).json({ "retorno": "error.. cliente ATRASADO - mais de 10 dias sem pagamento!" });
-                    }
-                    else {
-                        console.log("Seguindo...");
-                    }
-                    //FIM EVITANDO ESTORNO DUPLICADO
-                    estornarMP(req.query.id, tokenCliente, "máquina offline");
-                    //REGISTRAR O PAGAMENTO
-                    const novoPagamento = await prisma.pix_Pagamento.create({
-                        data: {
-                            maquinaId: maquina.id,
-                            valor: valor.toString(),
-                            mercadoPagoId: req.query.id,
-                            motivoEstorno: `04- máquina offline. str_id: ${str_id}`,
-                            estornado: true,
-                        },
-                    });
-                    return res.status(200).json({ "retorno": "PAGAMENTO ESTORNADO - MÁQUINA OFFLINE" });
-                }
-                //FIM VERIFICAÇÃO MÁQUINA OFFLINE
-                //VERIFICAR SE O VALOR PAGO É MAIOR QUE O VALOR MÍNIMO
-                const valorMinimo = parseFloat(maquina.valorDoPulso);
-                if (valor < valorMinimo) {
-                    console.log("iniciando estorno...");
-                    //EVITAR ESTORNO DUPLICADO
-                    const registroExistente = await prisma.pix_Pagamento.findFirst({
-                        where: {
-                            mercadoPagoId: req.query.id,
-                            estornado: true,
-                            clienteId: req.params.id
-                        },
-                    });
-                    if (registroExistente) {
-                        console.log("Esse estorno ja foi feito...");
-                        return res.status(200).json({ "retorno": "error.. cliente ATRASADO - mais de 10 dias sem pagamento!" });
-                    }
-                    else {
-                        console.log("Seguindo...");
-                    }
-                    //FIM EVITANDO ESTORNO DUPLICADO
-                    //REGISTRAR O PAGAMENTO
-                    const novoPagamento = await prisma.pix_Pagamento.create({
-                        data: {
-                            maquinaId: maquina.id,
-                            valor: valor.toString(),
-                            mercadoPagoId: req.query.id,
-                            motivoEstorno: `05- valor inferior ao mínimo. str_id: ${str_id}`,
-                            estornado: true,
-                        },
-                    });
-                    console.log("estornando valor inferior ao mínimo...");
-                    estornarMP(req.query.id, tokenCliente, "valor inferior ao mínimo");
-                    return res.status(200).json({
-                        "retorno": `PAGAMENTO ESTORNADO - INFERIOR AO VALOR 
-            MÍNIMO DE R$: ${valorMinimo} PARA ESSA MÁQUINA.`
-                    });
-                }
-                else {
-                    console.log("valor permitido finalizando operação...");
-                }
-                //VERIFICAR SE ESSE PAGAMENTO JÁ FOI EFETUADO
-                const registroExistente = await prisma.pix_Pagamento.findFirst({
-                    where: {
-                        mercadoPagoId: req.query.id,
-                        clienteId: req.params.id
-                    },
-                });
-                if (registroExistente) {
-                    console.log("Esse pagamento ja foi feito...");
-                    return res.status(200).json({ "retorno": "error.. Duplicidade de pagamento!" });
-                }
-                else {
-                    console.log("Seguindo...");
-                }
-                //VERIFICAR SE ESSE PAGAMENTO JÁ FOI EFETUADO
-                // promise para aguardar
-                const esperar = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-                const verificaPagamento = async (url, tokenCliente) => {
-                    try {
-                        const response = await axios_1.default.get(url, {
-                            headers: { Authorization: `Bearer ${tokenCliente}` },
-                        });
-                        const status = response.data.status;
-                        const valido = status === "approved";
-                        return { status, valido };
-                    }
-                    catch (error) {
-                        if (error instanceof Error) {
-                            console.error("Erro ao verificar pagamento:", error.message);
-                        }
-                        else {
-                            console.error("Erro desconhecido ao verificar pagamento:", error);
-                        }
-                        return { status: null, valido: false };
-                    }
-                };
-                await esperar(10000);
-                const resultado = await verificaPagamento(url, tokenCliente);
-                if (!resultado.valido) {
-                    console.log("Pagamento não realizado");
-                    return res.status(200).json({ "retorno": "error.. Status do pagamento : " + resultado.status });
-                }
-                //ATUALIZAR OS DADOS DA MÁQUINA QUE ESTAMOS RECEBENDO O PAGAMENTO
-                await prisma.pix_Maquina.update({
-                    where: {
-                        id: maquina.id,
-                    },
-                    data: {
-                        valorDoPix: valor.toString(),
-                        ultimoPagamentoRecebido: new Date(Date.now())
-                    }
-                });
-                //REGISTRAR O PAGAMENTO
-                const novoPagamento = await prisma.pix_Pagamento.create({
+            });
+            if (!jaEstornado) {
+                await estornarMP(paymentId, tokenCliente, "valor alto >= 250");
+                // ✅ AGORA VINCULA COM A MÁQUINA CORRETA
+                await prisma.pix_Pagamento.create({
                     data: {
                         maquinaId: maquina.id,
                         valor: valor.toString(),
-                        mercadoPagoId: req.query.id,
-                        motivoEstorno: ``,
-                        tipo: tipoPagamento,
-                        taxas: taxaDaOperacao,
-                        clienteId: cliId,
-                        estornado: false,
-                        operadora: `Mercado Pago`
-                    },
-                });
-                if (NOTIFICACOES_PAGAMENTOS) {
-                    notificarDiscord(DISCORD_WEBHOOKS.PAGAMENTOS, `Novo pagamento recebido no Mercado Pago. R$: ${valor.toString()}`, `Cliente ${cliente?.nome} Maquina: ${maquina?.nome}. Maquina: ${maquina?.descricao}`);
-                }
-                console.log('Pagamento inserido com sucesso:', novoPagamento);
-                return res.status(200).json(novoPagamento);
-            }
-            else {
-                //PROCESSAMENTO DE EVENTOS QUE NÃO SAO PAYMENTS DE LOJAS E CAIXAS
-                // Buscar na tabela cobranças se existe um registro com external_reference igual ao ID
-                const cobrancaExistente = await prisma.pix_Cobranca.findUnique({
-                    where: { id: external_reference },
-                });
-                if (cobrancaExistente && cobrancaExistente.dataDePagamento == null &&
-                    statusPagamento == 'approved') {
-                    console.log("Processar pagamento do cliente, renovação de mensalidade");
-                    const clientePagador = cobrancaExistente.clienteId;
-                    // Atualizar a data de vencimento do cliente para a data de renovação da cobrança
-                    await prisma.pix_Cliente.update({
-                        where: { id: clientePagador },
-                        data: { dataVencimento: cobrancaExistente.dataDeRenovacao },
-                    });
-                    console.log("Data de vencimento do cliente atualizada para: ", cobrancaExistente.dataDeRenovacao);
-                    if (cobrancaExistente.isVencido) {
-                        // Recuperar parcelas em atraso e marcá-las como PAGO
-                        const parcelasAtualizadas = await prisma.pix_PagamentoCliente.updateMany({
-                            where: {
-                                clienteId: clientePagador,
-                                dataDeVencimento: { lt: new Date() },
-                                status: { not: 'PAGO' },
-                            },
-                            data: {
-                                status: 'PAGO',
-                                dataDoPagamento: new Date(),
-                            },
-                        });
-                        if (parcelasAtualizadas) {
-                            console.log("Houve parcelas com débitos atualizadas.");
-                        }
+                        mercadoPagoId: paymentId,
+                        motivoEstorno: "valor alto >= 250",
+                        estornado: true,
+                        clienteId: cliente.id
                     }
-                    else {
-                        console.log("Cliente não tem atrasos, atualizando próxima cobrança em aberto.");
-                        // Procurar a próxima parcela com status ABERTO e atualizá-la para PAGO
-                        const proximaParcela = await prisma.pix_PagamentoCliente.findFirst({
-                            where: {
-                                clienteId: clientePagador,
-                                status: 'ABERTO',
-                            },
-                            orderBy: {
-                                dataDeVencimento: 'asc',
-                            },
-                        });
-                        if (proximaParcela) {
-                            await prisma.pix_PagamentoCliente.update({
-                                where: { id: proximaParcela.id },
-                                data: {
-                                    status: 'PAGO',
-                                    dataDoPagamento: new Date(),
-                                },
-                            });
-                            console.log("Próxima parcela com status ABERTO atualizada para PAGO.");
-                        }
-                        else {
-                            console.log("Nenhuma próxima parcela com status ABERTO encontrada.");
-                        }
-                    }
-                    // Atualizar a data de pagamento da cobrança.
-                    await prisma.pix_Cobranca.update({
-                        where: { id: cobrancaExistente.id },
-                        data: { dataDePagamento: new Date() },
-                    });
-                    console.log(mensagem);
-                    return res.status(200).json({ "retorno": mensagem });
-                }
+                });
             }
-        }).catch((error) => {
-            console.error('Erro ao processar pagamento, verifique se o token está cadastrado:', error);
-            // Aqui você pode adicionar qualquer lógica ou retorno desejado em caso de erro.
-            return res.status(500).json({ error: `${error.message}` });
+            processandoWebhooks.delete(paymentId);
+            return res.status(200).end();
+        }
+        // ================================
+        // 8. CLIENTE INATIVO / INADIMPLENTE
+        // ================================
+        let inadimplente = false;
+        if (cliente.dataVencimento) {
+            const diferencaEmMilissegundos = new Date().getTime() - cliente.dataVencimento.getTime();
+            const diferencaEmDias = Math.floor(diferencaEmMilissegundos / (1000 * 60 * 60 * 24));
+            if (diferencaEmDias > 10) {
+                inadimplente = true;
+            }
+        }
+        if (!cliente.ativo || inadimplente) {
+            const motivo = !cliente.ativo ? "cliente inativo" : "cliente inadimplente";
+            console.log(`🚫 ${motivo} → estorno`);
+            const jaEstornado = await prisma.pix_Pagamento.findFirst({
+                where: {
+                    mercadoPagoId: paymentId,
+                    estornado: true
+                }
+            });
+            if (!jaEstornado) {
+                await estornarMP(paymentId, tokenCliente, motivo);
+            }
+            await prisma.pix_Pagamento.create({
+                data: {
+                    maquinaId: maquina.id,
+                    valor: valor.toString(),
+                    mercadoPagoId: paymentId,
+                    motivoEstorno: motivo,
+                    estornado: true,
+                    clienteId: cliente.id // 👈 ADICIONA
+                }
+            });
+            processandoWebhooks.delete(paymentId);
+            return res.status(200).end();
+        }
+        // ================================
+        // 9. VALOR MÍNIMO
+        // ================================
+        const valorMinimo = parseFloat(maquina.valorDoPulso);
+        if (valor < valorMinimo) {
+            console.log("⚠️ Valor baixo → estorno");
+            const jaEstornado = await prisma.pix_Pagamento.findFirst({
+                where: {
+                    mercadoPagoId: paymentId,
+                    estornado: true
+                }
+            });
+            if (!jaEstornado) {
+                await estornarMP(paymentId, tokenCliente, "valor baixo");
+            }
+            await prisma.pix_Pagamento.create({
+                data: {
+                    maquinaId: maquina.id,
+                    valor: valor.toString(),
+                    mercadoPagoId: paymentId,
+                    motivoEstorno: "valor baixo",
+                    estornado: true,
+                    clienteId: cliente.id // 👈 ADICIONA
+                }
+            });
+            processandoWebhooks.delete(paymentId);
+            return res.status(200).end();
+        }
+        // ================================
+        // 10. DUPLICIDADE
+        // ================================
+        const existe = await prisma.pix_Pagamento.findFirst({
+            where: { mercadoPagoId: paymentId }
         });
+        if (existe) {
+            console.log("⚠️ Duplicado ignorado");
+            processandoWebhooks.delete(paymentId);
+            return res.status(200).end();
+        }
+        // ================================
+        // 11. SALVAR PAGAMENTO
+        // ================================
+        let metodoPagamento = "PIX";
+        if (tipoPagamento === "credit_card")
+            metodoPagamento = "CREDITO";
+        else if (tipoPagamento === "debit_card")
+            metodoPagamento = "DEBITO";
+        await prisma.pix_Maquina.update({
+            where: { id: maquina.id },
+            data: {
+                valorDoPix: valor.toString(),
+                metodoPagamento: metodoPagamento,
+                ultimoPagamentoRecebido: new Date()
+            }
+        });
+        await prisma.pix_Pagamento.create({
+            data: {
+                maquinaId: maquina.id,
+                valor: valor.toString(),
+                mercadoPagoId: paymentId,
+                tipo: tipoPagamento,
+                taxas: taxa,
+                clienteId: cliente.id,
+                estornado: false
+            }
+        });
+        pagamentoProcessado = true;
+        console.log(`
+💰 PAGAMENTO APROVADO
+👤 Cliente: ${cliente.nome} (${cliente.id})
+🏪 Máquina: ${maquina.nome} (${maquina.id})
+💳 Tipo: ${tipoPagamento}
+💰 Valor: R$ ${valor}
+💸 Taxa: R$ ${taxa}
+🧾 Payment ID: ${paymentId}
+`);
+        processandoWebhooks.delete(paymentId);
+        return res.status(200).json({ ok: true });
     }
     catch (error) {
-        console.error(error);
-        return res.status(402).json({ "error": "error: " + error });
+        console.error("🔥 ERRO:", error.message);
+        if (paymentId && tokenClienteGlobal && !pagamentoProcessado) {
+            console.log("💸 Estorno por erro interno");
+            try {
+                await estornarMP(paymentId, tokenClienteGlobal, "erro interno");
+            }
+            catch { }
+        }
+        if (paymentId) {
+            processandoWebhooks.delete(paymentId);
+        }
+        return res.status(200).end();
     }
 });
 //esse :id é o do seu cliente e não da máquina!
@@ -2838,35 +3591,97 @@ app.post("/webhookmercadopago/:id", async (req, res) => {
 //STORE ID MAQ ?valor=1
 app.post("/rota-recebimento-especie/:id", async (req, res) => {
     try {
-        //BUSCAR QUAL MÁQUINA ESTÁ SENDO UTILIZADA (id da máquina)
         const maquina = await prisma.pix_Maquina.findUnique({
             where: {
                 id: req.params.id,
+            },
+            include: {
+                cliente: true
             }
         });
-        const value = req.query.valor;
-        //PROCESSAR O PAGAMENTO (se eu tiver uma máquina com store_id cadastrado)
+        const value = Number(req.query.valor);
         if (maquina) {
-            console.log(`recebendo pagamento na máquina: ${maquina.nome}`);
-            //REGISTRAR O PAGAMENTO
+            const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || "");
+            console.log(`
+💵 RECEBIMENTO EM ESPÉCIE
+👤 Cliente: ${maquina?.cliente?.nome || ""} (${maquina.clienteId})
+🏪 Máquina: ${maquina.nome} (${maquina.id})
+💵 Valor: ${Number.isFinite(value) ? value : ""}
+🌐 IP: ${ip}
+`);
+            const metodosPermitidos = Array.isArray(maquina?.bonusMetodos)
+                ? maquina.bonusMetodos.map((m) => String(m).toUpperCase())
+                : [];
+            const podeLiberarEspecie = maquina.bonusAtivo === true && metodosPermitidos.includes("ESPECIE");
+            let bonusExtra = 0;
+            const valorNotaTexto = Number.isFinite(value) && value >= 0
+                ? value.toLocaleString("pt-BR", { style: "currency", currency: "BRL" })
+                : "R$ 0,00";
+            if (podeLiberarEspecie) {
+                const regras = Array.isArray(maquina?.bonusRegras)
+                    ? maquina.bonusRegras
+                    : [];
+                const valorPagoCentavos = Math.round(value * 100);
+                for (const regra of regras) {
+                    const minimoCentavos = Math.round(Number(regra.valorMinimo) * 100);
+                    if (valorPagoCentavos === minimoCentavos) {
+                        bonusExtra = Number(regra.bonus) || 0;
+                        break;
+                    }
+                }
+                const valorPulso = parseFloat(maquina.valorDoPulso || "1");
+                const valorPulsoSeguro = valorPulso && !Number.isNaN(valorPulso) && valorPulso > 0
+                    ? valorPulso
+                    : 1;
+                const valorParaLiberar = String(Math.max(0, bonusExtra) * valorPulsoSeguro);
+                await prisma.pix_Maquina.update({
+                    where: { id: maquina.id },
+                    data: {
+                        valorDoPix: bonusExtra > 0 ? valorParaLiberar : undefined,
+                        metodoPagamento: "ESPECIE",
+                        ultimoPagamentoRecebido: new Date(),
+                    },
+                });
+            }
+            else {
+                await prisma.pix_Maquina.update({
+                    where: { id: maquina.id },
+                    data: {
+                        metodoPagamento: "ESPECIE",
+                        ultimoPagamentoRecebido: new Date(),
+                    },
+                });
+            }
+            // 🔥 REGISTRO (MANTIDO)
             const novoPagamento = await prisma.pix_Pagamento.create({
                 data: {
                     maquinaId: maquina.id,
-                    valor: value,
+                    valor: String(value),
                     mercadoPagoId: "CASH",
-                    motivoEstorno: ``,
+                    motivoEstorno: podeLiberarEspecie ? `Observação: 1 nota de ${valorNotaTexto}` : ``,
                     tipo: "CASH",
                     estornado: false,
+                    clienteId: maquina.clienteId,
+                    valorBonus: podeLiberarEspecie && bonusExtra > 0 ? bonusExtra : 0,
                 },
             });
+            console.log(`
+💰 PAGAMENTO REGISTRADO (ESPÉCIE)
+👤 Cliente: ${maquina?.cliente?.nome || ""} (${maquina.clienteId})
+🏪 Máquina: ${maquina.nome} (${maquina.id})
+💵 Valor: ${valorNotaTexto}
+🎁 Bônus em espécie: ${podeLiberarEspecie ? "SIM" : "NÃO"}
+🎯 Bônus extra: ${bonusExtra}
+📝 ${novoPagamento.motivoEstorno || ""}
+`);
             if (NOTIFICACOES_PAGAMENTOS_ESPECIE) {
-                notificarDiscord(DISCORD_WEBHOOKS.PAGAMENTOS_ESPECIE, `Novo pagamento recebido. R$: ${novoPagamento.valor.toString()}`, ` Maquina: ${maquina?.nome}. Maquina: ${maquina?.descricao}`);
+                notificarDiscord(DISCORD_WEBHOOKS.PAGAMENTOS_ESPECIE, `Novo pagamento recebido. R$: ${novoPagamento.valor.toString()}`, `Maquina: ${maquina?.nome}. Descrição: ${maquina?.descricao}`);
             }
             return res.status(200).json({ "pagamento registrado": "Pagamento registrado" });
         }
         else {
-            console.log("error.. cliente nulo ou não encontrado!");
-            return res.status(404).json({ "retorno": "error.. máquina nulo ou não encontrado!" });
+            console.log("error.. máquina não encontrada!");
+            return res.status(404).json({ "retorno": "Máquina não encontrada!" });
         }
     }
     catch (error) {
@@ -2903,27 +3718,53 @@ app.post("/decrementar-estoque/:id/", async (req, res) => {
         });
         // Registrar a saída do produto no relatório do cliente
         if (maquina.clienteId) {
-            // Calcular o valor do produto que saiu
-            // Usando o valorDoPix da máquina como base para o cálculo
-            const valorUnitario = parseFloat(maquina.valorDoPix) || 0;
+            // Somar os valores de pagamentos anteriores desde a última saída de produto
+            const ultimaSaida = await prisma.pix_Pagamento.findFirst({
+                where: {
+                    maquinaId: maquina.id,
+                    tipo: "SAIDA_PRODUTO",
+                },
+                orderBy: { data: "desc" }
+            });
+            const referenciaData = ultimaSaida ? ultimaSaida.data : new Date(0);
+            const pagamentosAnteriores = await prisma.pix_Pagamento.findMany({
+                where: {
+                    maquinaId: maquina.id,
+                    estornado: false,
+                    removido: false,
+                    data: { gt: referenciaData, lte: new Date() },
+                    OR: [
+                        { tipo: "bank_transfer" },
+                        { tipo: "credit_card" },
+                        { tipo: "debit_card" },
+                        { tipo: "CASH" }
+                    ]
+                }
+            });
+            let valorAcumulado = 0;
+            for (const p of pagamentosAnteriores) {
+                const v = p.valor ? parseFloat(p.valor) : 0;
+                valorAcumulado += isNaN(v) ? 0 : v;
+            }
             const quantidade = Number(value) || 1;
-            const valorTotal = valorUnitario * quantidade;
-            // Criar um registro de pagamento para o cliente com informações sobre o produto vendido
+            // Criar um registro com o valor acumulado até esta saída, mas sem contabilizar no total
             await prisma.pix_Pagamento.create({
                 data: {
                     maquinaId: maquina.id,
-                    valor: valorTotal.toString(),
+                    valor: "0",
+                    mercadoPagoId: "saiu premio",
                     estornado: false,
                     tipo: "SAIDA_PRODUTO",
                     clienteId: maquina.clienteId,
-                    operadora: "SISTEMA",
+                    operadora: `Saiu ${quantidade} produto(s)`,
                     taxas: "0",
-                    motivoEstorno: `Saiu ${quantidade} produto(s) com valor total de R$ ${valorTotal.toFixed(2)}`,
+                    valorAcumulado: valorAcumulado.toString(),
+                    motivoEstorno: `Valor total gerado até a saída: R$ ${valorAcumulado.toFixed(2)}`,
                     data: new Date(),
                     removido: false
                 }
             });
-            console.log(`Saída de ${quantidade} produto(s) registrada para o cliente ${maquina.cliente?.nome} com valor total de R$ ${valorTotal.toFixed(2)}`);
+            console.log(`Saída de ${quantidade} produto(s) registrada para o cliente ${maquina.cliente?.nome} com valor acumulado de R$ ${valorAcumulado.toFixed(2)}`);
         }
         if (NOTIFICACOES_ESTOQUE) {
             notificarDiscord(DISCORD_WEBHOOKS.ESTOQUE, `Item vendido.`, ` Maquina: ${maquina?.nome}. Maquina: ${maquina?.descricao}. Cliente: ${maquina.cliente?.nome}`);
@@ -2971,9 +3812,18 @@ app.post('/setar-estoque/:id', async (req, res) => {
 app.get("/pagamentos/:maquinaId", verifyJWT, async (req, res) => {
     console.log(`${req.params.maquinaId} acessou a rota de pagamentos.`);
     try {
-        var totalRecebido = 0.0;
-        var totalEstornado = 0.0;
         var totalEspecie = 0.0;
+        let valorTotal = 0;
+        let valorPix = 0;
+        let valorCartaoCredito = 0;
+        let valorCartaoDebito = 0;
+        let valorCash = 0;
+        let qtd = 0;
+        let totalBruto = 0;
+        let totalLiquido = 0;
+        let taxaPix = 0;
+        let taxaCartaoCredito = 0;
+        let taxaCartaoDebito = 0;
         const pagamentos = await prisma.pix_Pagamento.findMany({
             where: {
                 maquinaId: req.params.maquinaId,
@@ -2996,6 +3846,26 @@ app.get("/pagamentos/:maquinaId", verifyJWT, async (req, res) => {
         let totalSemEstorno = 0;
         let totalComEstorno = 0;
         for (const pagamento of pagamentos) {
+            // Ignorar registros de saída de produto e marcador "saiu premio" nos totais
+            if (pagamento?.tipo === "SAIDA_PRODUTO" || pagamento?.mercadoPagoId === "saiu premio") {
+                continue;
+            }
+            if (pagamento.tipo === "CASH") {
+                valorCash += parseFloat(pagamento.valor);
+            }
+            else if (pagamento.tipo === "bank_transfer") {
+                valorPix += parseFloat(pagamento.valor);
+                taxaPix += parseFloat(pagamento.taxas);
+            }
+            else if (pagamento.tipo === "debit_card") {
+                valorCartaoDebito += parseFloat(pagamento.valor);
+                taxaCartaoDebito += parseFloat(pagamento.taxas);
+            }
+            else if (pagamento.tipo === "credit_card") {
+                valorCartaoCredito += parseFloat(pagamento.valor);
+                taxaCartaoCredito += parseFloat(pagamento.taxas);
+            }
+            qtd += 1;
             const valor = parseFloat(pagamento.valor);
             if (pagamento.estornado === false) {
                 totalSemEstorno += valor;
@@ -3003,6 +3873,8 @@ app.get("/pagamentos/:maquinaId", verifyJWT, async (req, res) => {
             else {
                 totalComEstorno += valor;
             }
+            totalBruto = totalComEstorno + totalSemEstorno;
+            totalLiquido = totalSemEstorno;
         }
         const especie = await prisma.pix_Pagamento.findMany({
             where: {
@@ -3015,7 +3887,24 @@ app.get("/pagamentos/:maquinaId", verifyJWT, async (req, res) => {
             const valor = parseFloat(e.valor);
             totalEspecie += valor;
         }
-        return res.status(200).json({ "total": totalSemEstorno, "estornos": totalComEstorno, "cash": totalEspecie, "estoque": estoque, "pagamentos": pagamentos });
+        return res.status(200).json({
+            "totalBruto": totalBruto,
+            "totalLiquido": totalLiquido,
+            "total": totalSemEstorno,
+            "estornos": totalComEstorno,
+            "cash": totalEspecie,
+            "estoque": estoque,
+            "store_id": maquina.store_id,
+            "pagamentos": pagamentos,
+            "totalCash": valorCash,
+            "totalPix": valorPix,
+            "totalCartaoCredito": valorCartaoCredito,
+            "totalCartaoDebito": valorCartaoDebito,
+            "taxaCartaoCredito": taxaCartaoCredito,
+            "taxaCartaoDebito": taxaCartaoDebito,
+            "taxaPix": taxaPix,
+            "qtd": qtd
+        });
     }
     catch (err) {
         console.log(err);
@@ -3035,12 +3924,12 @@ app.get("/pagamentos-adm/:maquinaId", verifyJwtPessoa, async (req, res) => {
                 removido: false
             },
             orderBy: {
-                data: 'desc', // 'desc' para ordem decrescente (da mais recente para a mais antiga)
+                data: 'desc',
             }
         });
         const maquina = await prisma.pix_Maquina.findUnique({
             where: {
-                id: req.params.maquinaId
+                id: req.params.maquinaId,
             }
         });
         if (!maquina) {
@@ -3051,6 +3940,10 @@ app.get("/pagamentos-adm/:maquinaId", verifyJwtPessoa, async (req, res) => {
         let totalSemEstorno = 0;
         let totalComEstorno = 0;
         for (const pagamento of pagamentos) {
+            // Ignorar registros de saída de produto e marcador "saiu premio" nos totais
+            if (pagamento?.tipo === "SAIDA_PRODUTO" || pagamento?.mercadoPagoId === "saiu premio") {
+                continue;
+            }
             const valor = parseFloat(pagamento.valor);
             if (pagamento.estornado === false) {
                 totalSemEstorno += valor;
@@ -3070,7 +3963,7 @@ app.get("/pagamentos-adm/:maquinaId", verifyJwtPessoa, async (req, res) => {
             const valor = parseFloat(e.valor);
             totalEspecie += valor;
         }
-        return res.status(200).json({ "total": totalSemEstorno, "estornos": totalComEstorno, "cash": totalEspecie, "estoque": estoque, "pagamentos": pagamentos });
+        return res.status(200).json({ "total": totalSemEstorno, "estornos": totalComEstorno, "cash": totalEspecie, "estoque": estoque, "store_id": maquina.store_id, "pagamentos": pagamentos });
     }
     catch (err) {
         console.log(err);
@@ -3079,12 +3972,65 @@ app.get("/pagamentos-adm/:maquinaId", verifyJwtPessoa, async (req, res) => {
 });
 //RELATORIO DE PAGAMENTOS POR MÁQUINA POR PERÍODO
 app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req, res) => {
+    console.log(req.body.dataInicio);
+    console.log(req.body.dataFim);
     try {
-        var totalRecebido = 0.0;
-        var totalEstornado = 0.0;
         var totalEspecie = 0.0;
-        const dataInicio = new Date(req.body.dataInicio);
-        const dataFim = new Date(req.body.dataFim);
+        let valorTotal = 0;
+        let valorPix = 0;
+        let valorCartaoCredito = 0;
+        let valorCartaoDebito = 0;
+        let valorCash = 0;
+        let qtd = 0;
+        let totalBruto = 0;
+        let totalLiquido = 0;
+        let taxaPix = 0;
+        let taxaCartaoCredito = 0;
+        let taxaCartaoDebito = 0;
+        let dataInicio;
+        let dataFim;
+        const dataInicioFiltro = new Date(req.body.dataInicio);
+        const dataFimFiltro = new Date(req.body.dataFim);
+        let inicioFiltro = null;
+        let fimFiltro = null;
+        if (!req.body.dataInicio || !req.body.dataFim) {
+            dataFim = new Date();
+            dataInicio = new Date();
+            dataInicio.setDate(dataFim.getDate() - 3);
+        }
+        else {
+            dataInicio = new Date(req.body.dataInicio);
+            dataFim = new Date(req.body.dataFim);
+            // if (isNaN(dataInicio.getTime()) || isNaN(dataFim.getTime())) {
+            //   return res.status(400).json({
+            //     error: "Datas inválidas",
+            //   });
+            // }
+            // Trabalha 100% em UTC (sem gambiarra)
+            //       const inicio = new Date(Date.UTC(
+            //         dataInicioFiltro.getUTCFullYear(),
+            //         dataInicioFiltro.getUTCMonth(),
+            //         dataInicioFiltro.getUTCDate(),
+            //         0, 0, 0, 0
+            //       ));
+            //       const fim = new Date(Date.UTC(
+            //         dataFimFiltro.getUTCFullYear(),
+            //         dataFimFiltro.getUTCMonth(),
+            //         dataFimFiltro.getUTCDate(),
+            //         23, 59, 59, 999
+            //       ));
+            //       dataInicio = inicio;
+            //       dataFim = fim;
+            //       console.log("FILTRO UTC INICIO:", inicio.toISOString());
+            // console.log("FILTRO UTC FIM:", fim.toISOString());
+            // dataInicio = new Date(req.body.dataInicio);
+            // dataInicio.setHours(0, 0, 0, 0);
+            // dataFim = new Date(req.body.dataFim);
+            // dataFim.setHours(0, 0, 0, 0);
+            // dataFim.setDate(dataFim.getDate() + 1);
+        }
+        // dataInicio.setUTCHours(0, 0, 0, 0);
+        // dataFim.setUTCHours(23, 59, 59, 999);
         const pagamentos = await prisma.pix_Pagamento.findMany({
             where: {
                 maquinaId: req.params.maquinaId,
@@ -3094,12 +4040,40 @@ app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req, res) => {
                 },
             },
             orderBy: {
-                data: 'desc', // 'desc' para ordem decrescente (da mais recente para a mais antiga)
+                data: 'desc',
+            }
+        });
+        const maquina = await prisma.pix_Maquina.findUnique({
+            where: {
+                id: req.params.maquinaId
             }
         });
         let totalSemEstorno = 0;
         let totalComEstorno = 0;
         for (const pagamento of pagamentos) {
+            if (pagamento?.tipo === "SAIDA_PRODUTO" || pagamento?.mercadoPagoId === "saiu premio") {
+                continue;
+            }
+            if (pagamento.mercadoPagoId === 'CASH') {
+                const valor = parseFloat(pagamento.valor);
+                totalEspecie += valor;
+            }
+            if (pagamento.tipo === "CASH") {
+                valorCash += parseFloat(pagamento.valor);
+            }
+            else if (pagamento.tipo === "bank_transfer") {
+                valorPix += parseFloat(pagamento.valor);
+                taxaPix += parseFloat(pagamento.taxas);
+            }
+            else if (pagamento.tipo === "debit_card") {
+                valorCartaoDebito += parseFloat(pagamento.valor);
+                taxaCartaoDebito += parseFloat(pagamento.taxas);
+            }
+            else if (pagamento.tipo === "credit_card") {
+                valorCartaoCredito += parseFloat(pagamento.valor);
+                taxaCartaoCredito += parseFloat(pagamento.taxas);
+            }
+            qtd += 1;
             const valor = parseFloat(pagamento.valor);
             if (pagamento.estornado === false) {
                 totalSemEstorno += valor;
@@ -3107,19 +4081,37 @@ app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req, res) => {
             else {
                 totalComEstorno += valor;
             }
+            totalBruto = totalComEstorno + totalSemEstorno;
+            totalLiquido = totalSemEstorno;
         }
-        const especie = await prisma.pix_Pagamento.findMany({
-            where: {
-                maquinaId: req.params.maquinaId,
-                removido: false,
-                mercadoPagoId: `CASH`
-            }
+        // const especie = await prisma.pix_Pagamento.findMany({
+        //   where: {
+        //     maquinaId: req.params.maquinaId,
+        //     removido: false,
+        //     mercadoPagoId: `CASH`
+        //   }
+        // });
+        // for (const e of especie) {
+        //   const valor = parseFloat(e.valor);
+        //   totalEspecie += valor;
+        // }
+        return res.status(200).json({
+            "totalBruto": totalBruto,
+            "totalLiquido": totalLiquido,
+            "total": totalSemEstorno,
+            "estornos": totalComEstorno,
+            "cash": totalEspecie,
+            "store_id": maquina?.store_id,
+            "pagamentos": pagamentos,
+            "totalCash": valorCash,
+            "totalPix": valorPix,
+            "totalCartaoCredito": valorCartaoCredito,
+            "totalCartaoDebito": valorCartaoDebito,
+            "taxaCartaoCredito": taxaCartaoCredito,
+            "taxaCartaoDebito": taxaCartaoDebito,
+            "taxaPix": taxaPix,
+            "qtd": qtd
         });
-        for (const e of especie) {
-            const valor = parseFloat(e.valor);
-            totalEspecie += valor;
-        }
-        return res.status(200).json({ "total": totalSemEstorno, "estornos": totalComEstorno, "cash": totalEspecie, "pagamentos": pagamentos });
     }
     catch (err) {
         console.log(err);
@@ -3132,8 +4124,24 @@ app.post("/pagamentos-periodo-adm/:maquinaId", verifyJwtPessoa, async (req, res)
         var totalRecebido = 0.0;
         var totalEstornado = 0.0;
         var totalEspecie = 0.0;
-        const dataInicio = new Date(req.body.dataInicio);
-        const dataFim = new Date(req.body.dataFim);
+        let dataInicio;
+        let dataFim;
+        if (!req.body.dataInicio || !req.body.dataFim) {
+            dataFim = new Date();
+            dataInicio = new Date();
+            dataInicio.setDate(dataFim.getDate() - 3);
+        }
+        else {
+            dataInicio = new Date(req.body.dataInicio);
+            dataFim = new Date(req.body.dataFim);
+            if (isNaN(dataInicio.getTime()) || isNaN(dataFim.getTime())) {
+                return res.status(400).json({
+                    error: "Datas inválidas",
+                });
+            }
+        }
+        dataInicio.setHours(0, 0, 0, 0);
+        dataFim.setHours(23, 59, 59, 999);
         const pagamentos = await prisma.pix_Pagamento.findMany({
             where: {
                 maquinaId: req.params.maquinaId,
@@ -3143,12 +4151,24 @@ app.post("/pagamentos-periodo-adm/:maquinaId", verifyJwtPessoa, async (req, res)
                 },
             },
             orderBy: {
-                data: 'desc', // 'desc' para ordem decrescente (da mais recente para a mais antiga)
+                data: 'desc',
+            }
+        });
+        const maquina = await prisma.pix_Maquina.findUnique({
+            where: {
+                id: req.params.maquinaId
             }
         });
         let totalSemEstorno = 0;
         let totalComEstorno = 0;
         for (const pagamento of pagamentos) {
+            if (pagamento?.tipo === "SAIDA_PRODUTO" || pagamento?.mercadoPagoId === "saiu premio") {
+                continue;
+            }
+            if (pagamento.mercadoPagoId === 'CASH') {
+                const valor = parseFloat(pagamento.valor);
+                totalEspecie += valor;
+            }
             const valor = parseFloat(pagamento.valor);
             if (pagamento.estornado === false) {
                 totalSemEstorno += valor;
@@ -3157,18 +4177,22 @@ app.post("/pagamentos-periodo-adm/:maquinaId", verifyJwtPessoa, async (req, res)
                 totalComEstorno += valor;
             }
         }
-        const especie = await prisma.pix_Pagamento.findMany({
-            where: {
-                maquinaId: req.params.maquinaId,
-                removido: false,
-                mercadoPagoId: `CASH`
-            }
-        });
-        for (const e of especie) {
-            const valor = parseFloat(e.valor);
-            totalEspecie += valor;
-        }
-        return res.status(200).json({ "total": totalSemEstorno, "estornos": totalComEstorno, "cash": totalEspecie, "pagamentos": pagamentos });
+        // const especie = await prisma.pix_Pagamento.findMany({
+        //   where: {
+        //     maquinaId: req.params.maquinaId,
+        //     removido: false,
+        //     mercadoPagoId: `CASH`,
+        //     data: {
+        //       gte: dataInicio,
+        //       lte: dataFim,
+        //     },
+        //   }
+        // });
+        // for (const e of especie) {
+        //   const valor = parseFloat(e.valor);
+        //   totalEspecie += valor;
+        // }
+        return res.status(200).json({ "total": totalSemEstorno, "estornos": totalComEstorno, "cash": totalEspecie, "store_id": maquina?.store_id, "pagamentos": pagamentos });
     }
     catch (err) {
         console.log(err);
@@ -3199,6 +4223,63 @@ app.delete('/delete-pagamentos/:maquinaId', verifyJWT, async (req, res) => {
             }
         });
         res.status(200).json({ message: `Todos os pagamentos para a máquina com ID ${maquinaId} foram removidos.` });
+    }
+    catch (error) {
+        console.error('Erro ao deletar os pagamentos:', error);
+        res.status(500).json({ error: 'Erro ao deletar os pagamentos.' });
+    }
+});
+app.delete('/delete-pagamento/:pagamentoId', verifyJwtPessoa, async (req, res) => {
+    const pagamentoId = req.params.pagamentoId;
+    try {
+        // Deletar um pagamento específico
+        await prisma.pix_Pagamento.update({
+            where: {
+                id: pagamentoId
+            },
+            data: {
+                removido: true
+            }
+        });
+        res.status(200).json({ message: `Pagamento ${pagamentoId} removido com sucesso.` });
+    }
+    catch (error) {
+        console.error('Erro ao deletar os pagamentos:', error);
+        res.status(500).json({ error: 'Erro ao deletar os pagamentos.' });
+    }
+});
+app.delete('/delete-pagamento-cliente/:pagamentoId', verifyJWT, async (req, res) => {
+    const pagamentoId = req.params.pagamentoId;
+    try {
+        // Deletar um pagamento específico
+        await prisma.pix_Pagamento.update({
+            where: {
+                id: pagamentoId
+            },
+            data: {
+                removido: true
+            }
+        });
+        res.status(200).json({ message: `Pagamento ${pagamentoId} removido com sucesso.` });
+    }
+    catch (error) {
+        console.error('Erro ao deletar os pagamentos:', error);
+        res.status(500).json({ error: 'Erro ao deletar os pagamentos.' });
+    }
+});
+app.delete('/delete-pagamento-cliente/:pagamentoId', verifyJWT, async (req, res) => {
+    const pagamentoId = req.params.pagamentoId;
+    try {
+        // Deletar um pagamento específico
+        await prisma.pix_Pagamento.update({
+            where: {
+                id: pagamentoId
+            },
+            data: {
+                removido: true
+            }
+        });
+        res.status(200).json({ message: `Pagamento ${pagamentoId} removido com sucesso.` });
     }
     catch (error) {
         console.error('Erro ao deletar os pagamentos:', error);
@@ -4853,6 +5934,8 @@ app.get("/machines-adm", verifyJwtPessoa, async (req, res) => {
                 store_id: maquina.store_id || "",
                 maquininha_serial: maquina.maquininha_serial || "",
                 nivelDeSinal: maquina.nivelDeSinal || null,
+                bonusAtivo: maquina.bonusAtivo,
+                bonusRegras: maquina.bonusRegras,
                 clienteNome: maquina.cliente ? maquina.cliente.nome : "",
             };
             // Separando as máquinas em online e offline
@@ -4914,6 +5997,8 @@ app.get("/machines-client", verifyJWT, async (req, res) => {
                 descricao: maquina.descricao || "",
                 store_id: maquina.store_id || "",
                 maquininha_serial: maquina.maquininha_serial || "",
+                bonusAtivo: maquina.bonusAtivo,
+                bonusRegras: maquina.bonusRegras,
                 clienteNome: maquina.cliente ? maquina.cliente.nome : "",
             };
             // Separando as máquinas em online e offline
@@ -4940,44 +6025,109 @@ app.get("/machines-client", verifyJWT, async (req, res) => {
 });
 app.get("/payments-client", verifyJWT, async (req, res) => {
     try {
-        const { filtro, dataInicio, dataFim } = req.query;
+        const { filtro, dataInicio, dataFim, maquinaId } = req.query;
+        let valorTotal = 0;
+        let valorPix = 0;
+        let valorCartaoCredito = 0;
+        let valorCartaoDebito = 0;
+        let valorCash = 0;
+        let qtd = 0;
+        let totalEstorno = 0;
+        let totalSemEstorno = 0;
+        let totalBruto = 0;
+        let totalLiquido = 0;
         // Filtros dinâmicos
         const where = {
-            clienteId: req.userId,
-            estornado: false, // Apenas pagamentos não estornados
+            maquinaId: maquinaId,
+            estornado: false,
         };
         const agora = new Date();
         let inicioFiltro = null;
         let fimFiltro = null;
         // Aplicar filtros com base no parâmetro 'filtro'
+        // switch (filtro) {
+        //   case "ultimos7dias":
+        //     inicioFiltro = new Date();
+        //     inicioFiltro.setDate(agora.getDate() - 7); // Últimos 7 dias
+        //     fimFiltro = agora;
+        //     break;
+        //   case "mesatual":
+        //     inicioFiltro = new Date(agora.getFullYear(), agora.getMonth(), 1); // Primeiro dia do mês atual
+        //     fimFiltro = agora; // Hoje
+        //     break;
+        //   case "mespassado":
+        //     inicioFiltro = new Date(agora.getFullYear(), agora.getMonth() - 1, 1); // Primeiro dia do mês passado
+        //     fimFiltro = new Date(agora.getFullYear(), agora.getMonth(), 0); // Último dia do mês passado
+        //     break;
+        //   case "periodo":
+        //     if (!dataInicio || !dataFim) {
+        //       return res.status(400).json({ error: "Os parâmetros dataInicio e dataFim são obrigatórios para o filtro 'periodo'." });
+        //     }
+        //     // inicioFiltro = new Date(dataInicio);
+        //     // fimFiltro = new Date(dataFim);
+        //     // inicioFiltro.setUTCHours(0, 0, 0, 0);
+        //     // fimFiltro.setUTCHours(23, 59, 59, 999);
+        //     inicioFiltro = new Date(dataInicio);
+        //     fimFiltro = new Date(dataFim);
+        //     // Ajusta no horário LOCAL (não UTC)
+        //     inicioFiltro.setHours(0, 0, 0, 0);
+        //     fimFiltro.setHours(23, 59, 59, 999);
+        //     break;
+        //   case "todos":
+        //     // Nenhum filtro de data é aplicado
+        //     inicioFiltro = null;
+        //     fimFiltro = null;
+        //     break;
+        //   default:
+        //     // Se o filtro não for válido, retorna um erro
+        //     return res.status(400).json({ error: "Filtro inválido." });
+        // }
         switch (filtro) {
-            case "ultimos7dias":
-                inicioFiltro = new Date();
-                inicioFiltro.setDate(agora.getDate() - 7); // Últimos 7 dias
-                fimFiltro = agora;
+            case "ultimos7dias": {
+                const hoje = new Date();
+                hoje.setHours(0, 0, 0, 0);
+                inicioFiltro = new Date(hoje);
+                inicioFiltro.setDate(inicioFiltro.getDate() - 7);
+                fimFiltro = new Date(hoje);
+                fimFiltro.setDate(fimFiltro.getDate() + 1); // exclusivo
                 break;
-            case "mesatual":
-                inicioFiltro = new Date(agora.getFullYear(), agora.getMonth(), 1); // Primeiro dia do mês atual
-                fimFiltro = agora; // Hoje
+            }
+            case "mesatual": {
+                // Primeiro dia do mês (00:00)
+                inicioFiltro = new Date(agora.getFullYear(), agora.getMonth(), 1);
+                inicioFiltro.setHours(0, 0, 0, 0);
+                // Primeiro dia do próximo mês (exclusivo)
+                fimFiltro = new Date(agora.getFullYear(), agora.getMonth() + 1, 1);
+                fimFiltro.setHours(0, 0, 0, 0);
                 break;
-            case "mespassado":
-                inicioFiltro = new Date(agora.getFullYear(), agora.getMonth() - 1, 1); // Primeiro dia do mês passado
-                fimFiltro = new Date(agora.getFullYear(), agora.getMonth(), 0); // Último dia do mês passado
+            }
+            case "mespassado": {
+                // Primeiro dia do mês passado
+                inicioFiltro = new Date(agora.getFullYear(), agora.getMonth() - 1, 1);
+                inicioFiltro.setHours(0, 0, 0, 0);
+                // Primeiro dia do mês atual (exclusivo)
+                fimFiltro = new Date(agora.getFullYear(), agora.getMonth(), 1);
+                fimFiltro.setHours(0, 0, 0, 0);
                 break;
-            case "periodo":
+            }
+            case "periodo": {
                 if (!dataInicio || !dataFim) {
-                    return res.status(400).json({ error: "Os parâmetros dataInicio e dataFim são obrigatórios para o filtro 'periodo'." });
+                    return res.status(400).json({
+                        error: "Os parâmetros dataInicio e dataFim são obrigatórios para o filtro 'periodo'."
+                    });
                 }
                 inicioFiltro = new Date(dataInicio);
+                inicioFiltro.setHours(0, 0, 0, 0);
                 fimFiltro = new Date(dataFim);
+                fimFiltro.setHours(0, 0, 0, 0);
+                fimFiltro.setDate(fimFiltro.getDate() + 1); // exclusivo
                 break;
+            }
             case "todos":
-                // Nenhum filtro de data é aplicado
                 inicioFiltro = null;
                 fimFiltro = null;
                 break;
             default:
-                // Se o filtro não for válido, retorna um erro
                 return res.status(400).json({ error: "Filtro inválido." });
         }
         // Adiciona o filtro de data se houver (exceto no caso de 'todos')
@@ -4990,22 +6140,46 @@ app.get("/payments-client", verifyJWT, async (req, res) => {
         // Busca todos os pagamentos de acordo com os filtros aplicados para a soma
         const pagamentos = await prisma.pix_Pagamento.findMany({
             where: where,
-            select: {
-                valor: true, // Seleciona apenas o campo 'valor' para a soma
-            },
         });
-        // Faz a soma dos valores convertidos de string para número
-        const soma = pagamentos.reduce((acc, pagamento) => {
-            const valorNumerico = parseFloat(pagamento.valor); // Converte string para número
-            return acc + (isNaN(valorNumerico) ? 0 : valorNumerico); // Verifica se é um número válido
-        }, 0);
+        for (const pagamento of pagamentos) {
+            if (pagamento?.tipo === "SAIDA_PRODUTO" || pagamento?.mercadoPagoId === "saiu premio") {
+                continue;
+            }
+            if (pagamento.tipo === "CASH") {
+                valorCash += parseFloat(pagamento.valor);
+            }
+            else if (pagamento.tipo === "bank_transfer") {
+                valorPix += parseFloat(pagamento.valor);
+            }
+            else if (pagamento.tipo === "debit_card") {
+                valorCartaoDebito += parseFloat(pagamento.valor);
+            }
+            else if (pagamento.tipo === "credit_card") {
+                valorCartaoCredito += parseFloat(pagamento.valor);
+            }
+            qtd += 1;
+            valorTotal += parseFloat(pagamento.valor);
+            if (pagamento.estornado === true) {
+                totalEstorno += parseFloat(pagamento.valor);
+            }
+            else {
+                totalSemEstorno += parseFloat(pagamento.valor);
+            }
+            totalBruto = totalEstorno + totalSemEstorno;
+            totalLiquido = totalSemEstorno;
+        }
         // Busca os 10 pagamentos mais recentes de acordo com os filtros aplicados e inclui nome e descrição da máquina
         const pagamentosRecentes = await prisma.pix_Pagamento.findMany({
-            where: where,
+            where: {
+                ...where,
+                tipo: {
+                    not: 'SAIDA_PRODUTO',
+                },
+            },
             orderBy: {
                 data: "desc", // Ordena por data, mais recentes primeiro
             },
-            take: 10,
+            // take: 10, // Limita a 10 registros
             select: {
                 id: true,
                 valor: true,
@@ -5024,7 +6198,16 @@ app.get("/payments-client", verifyJWT, async (req, res) => {
         });
         // Retorna o somatório dos valores dos pagamentos e os 10 pagamentos mais recentes
         return res.status(200).json({
-            soma: soma.toFixed(2),
+            soma: valorTotal.toFixed(2),
+            totalBruto: totalBruto,
+            totalLiquido: totalLiquido,
+            totalEstorno: totalEstorno,
+            valorCartaoCredito: valorCartaoCredito,
+            valorCartaoDebito: valorCartaoDebito,
+            valorPix: valorPix,
+            valorCash: valorCash,
+            qtd: qtd,
+            valorTotal: valorTotal,
             pagamentosRecentes: pagamentosRecentes.map(pagamento => ({
                 id: pagamento.id,
                 valor: pagamento.valor,
@@ -5398,7 +6581,7 @@ app.post("/forgot-password", async (req, res) => {
                 pass: PASSWORD_NODEMAILER,
             },
         });
-        const resetLink = `https://testeisaac-3d6cbadea18a.herokuapp.com/reset-password/${token}`;
+        const resetLink = `${process.env.SYSTEM_URL}/reset-password/${token}`;
         await transporter.sendMail({
             to: email,
             subject: "Recuperação de Senha",
@@ -5441,6 +6624,287 @@ app.post("/reset-password/:token", async (req, res) => {
     catch (error) {
         console.error(error);
         res.status(500).json({ message: "Erro interno do servidor" });
+    }
+});
+// Auditoria
+app.post("/auditoria-pagamentos", verifyJwtPessoa, async (req, res) => {
+    try {
+        let { dataInicio, dataFim, id, tipoPagamento, pagamentoId, maquinaId } = req.body;
+        // 🧭 Se datas não vierem, define padrão: últimos 30 dias
+        if (!dataInicio || !dataFim) {
+            const hoje = new Date();
+            const trintaDiasAtras = new Date();
+            trintaDiasAtras.setDate(hoje.getDate() - 30);
+            dataInicio = trintaDiasAtras.toISOString().split('T')[0]; // yyyy-mm-dd
+            dataFim = hoje.toISOString().split('T')[0]; // yyyy-mm-dd
+        }
+        else {
+            // 🧹 Se vier no formato dd/mm/yyyy -> converte para yyyy-mm-dd
+            if (dataInicio.includes('/')) {
+                const [dia, mes, ano] = dataInicio.split('/');
+                dataInicio = `${ano}-${mes.padStart(2, '0')}-${dia.padStart(2, '0')}`;
+            }
+            if (dataFim.includes('/')) {
+                const [dia, mes, ano] = dataFim.split('/');
+                dataFim = `${ano}-${mes.padStart(2, '0')}-${dia.padStart(2, '0')}`;
+            }
+        }
+        // ✅ Cria Date com segurança
+        const inicio = new Date(`${dataInicio}T00:00:00-03:00`);
+        const fim = new Date(`${dataFim}T23:59:59-03:00`);
+        console.log("Data Início:", inicio);
+        console.log("Data Fim:", fim);
+        console.log("Maquina Id:", maquinaId);
+        console.log("Pagamento Id:", pagamentoId);
+        console.log("Tipo Pagamento:", tipoPagamento);
+        // 🔍 Busca pagamentos
+        let pagamentosOriginais = [];
+        if (tipoPagamento === 'MAQUINA') {
+            pagamentosOriginais = await prisma.pix_Pagamento.findMany({
+                where: {
+                    maquinaId: maquinaId,
+                },
+                orderBy: { data: "desc" },
+            });
+        }
+        else if (tipoPagamento === 'DATA') {
+            pagamentosOriginais = await prisma.pix_Pagamento.findMany({
+                where: {
+                    clienteId: id,
+                    data: {
+                        gte: inicio,
+                        lte: fim,
+                    },
+                },
+                orderBy: { data: "desc" },
+            });
+        }
+        else {
+            pagamentosOriginais = await prisma.pix_Pagamento.findMany({
+                where: {
+                    mercadoPagoId: pagamentoId,
+                },
+                orderBy: { data: "desc" },
+            });
+        }
+        const pagamentosFiltrados = [];
+        const estornosVistos = new Set();
+        let totalSemEstorno = 0;
+        let totalComEstorno = 0;
+        for (const pagamento of pagamentosOriginais) {
+            const dataLocal = new Date(pagamento.data);
+            dataLocal.setHours(dataLocal.getHours() - 3);
+            if (tipoPagamento === 'PAGAMENTO') {
+                const valor = parseFloat(pagamento.valor);
+                if (pagamento.tipo !== 'CASH') {
+                    if (!pagamento.estornado) {
+                        totalSemEstorno += valor;
+                        pagamentosFiltrados.push({ ...pagamento, dataLocal });
+                    }
+                    else if (!estornosVistos.has(pagamento.mercadoPagoId)) {
+                        estornosVistos.add(pagamento.mercadoPagoId);
+                        totalComEstorno += valor;
+                        pagamentosFiltrados.push({ ...pagamento, dataLocal });
+                    }
+                }
+            }
+            else {
+                if (dataLocal >= inicio && dataLocal <= fim) {
+                    const valor = parseFloat(pagamento.valor);
+                    if (pagamento.tipo !== 'CASH') {
+                        if (!pagamento.estornado) {
+                            totalSemEstorno += valor;
+                            pagamentosFiltrados.push({ ...pagamento, dataLocal });
+                        }
+                        else if (!estornosVistos.has(pagamento.mercadoPagoId)) {
+                            estornosVistos.add(pagamento.mercadoPagoId);
+                            totalComEstorno += valor;
+                            pagamentosFiltrados.push({ ...pagamento, dataLocal });
+                        }
+                    }
+                }
+            }
+        }
+        return res.status(200).json({
+            total: totalSemEstorno,
+            totalComEstorno,
+            pagamentos: pagamentosFiltrados,
+        });
+    }
+    catch (err) {
+        console.error(err);
+        return res.status(500).json({ retorno: "ERRO" });
+    }
+});
+app.get("/auditoria-pagamentos-detalhe/:id", verifyJwtPessoa, async (req, res) => {
+    try {
+        let mercadopago;
+        // Busca todos os pagamentos (sem filtro de data) - maquina
+        const pagamento = await prisma.pix_Pagamento.findUnique({
+            where: {
+                id: req.params.id,
+            },
+            include: {
+                cliente: true,
+                maquina: true
+            }
+        });
+        if (!pagamento) {
+            return res.status(404).json({ error: "Pagamento não encontrado" });
+        }
+        var url = "https://api.mercadopago.com/v1/payments/" + pagamento.mercadoPagoId;
+        axios_1.default.get(url, {
+            headers: {
+                Authorization: `Bearer ${pagamento.cliente?.mercadoPagoToken}`
+            },
+        }).then((resMp) => {
+            console.log(resMp.data);
+            return res.status(200).json({
+                erro: false,
+                pagamento: pagamento,
+                mercadopago: resMp.data
+            });
+        }).catch((err) => {
+            console.log(err);
+            return res.status(200).json({
+                erro: true,
+                msg: err,
+            });
+        });
+    }
+    catch (err) {
+        console.error(err);
+        return res.status(500).json({ retorno: "ERRO" });
+    }
+});
+app.post("/gerar-link", verifyJWT, async (req, res) => {
+    try {
+        console.log("🔥 GERAR LINK CHAMADO");
+        const { maquinaId, valor } = req.body;
+        // Se valor não vier, usa o valor padrão da máquina ou 1.00
+        let valorFinal = valor ? parseFloat(valor) : 1.0;
+        if (isNaN(valorFinal))
+            valorFinal = 1.0;
+        const id = gerarNumeroAleatorio();
+        await limparLinksExpirados();
+        await prisma.pix_Link.create({
+            data: {
+                id,
+                maquinaId,
+                valor: valorFinal,
+                usado: false
+            }
+        });
+        return res.json({
+            link: `${process.env.FRONT_URL}/liberar/${id}`
+        });
+    }
+    catch (err) {
+        console.error("ERRO GERAR LINK:", err);
+        return res.status(500).json({ error: err });
+    }
+});
+app.post("/usar-link/:id", async (req, res) => {
+    try {
+        const { id } = req.params;
+        console.log("🔗 USANDO LINK:", id);
+        const link = await prisma.pix_Link.findUnique({
+            where: { id }
+        });
+        if (!link || link.usado) {
+            return res.status(400).json({ error: "Link inválido ou já usado" });
+        }
+        const limite = new Date(Date.now() - LINK_EXPIRACAO_MS);
+        if (!link.createdAt || link.createdAt < limite) {
+            try {
+                await prisma.pix_Link.delete({ where: { id } });
+            }
+            catch (e) { }
+            return res.status(400).json({ error: "Link expirado" });
+        }
+        const maquina = await prisma.pix_Maquina.findUnique({
+            where: { id: link.maquinaId },
+            include: { cliente: true }
+        });
+        if (!maquina) {
+            return res.status(404).json({ error: "Máquina não encontrada" });
+        }
+        // 🔥 VERIFICAR ANTES DE LIBERAR
+        if (maquina.ultimaRequisicao) {
+            const status = tempoOffline(maquina.ultimaRequisicao) > 60 ? "OFFLINE" : "ONLINE";
+            if (status === "OFFLINE") {
+                return res.status(400).json({ msg: "MÁQUINA OFFLINE!" });
+            }
+        }
+        else {
+            return res.status(400).json({ msg: "MÁQUINA OFFLINE!" });
+        }
+        // 🔥 AGORA SIM LIBERA
+        await prisma.pix_Maquina.update({
+            where: { id: maquina.id },
+            data: {
+                valorDoPix: String(link.valor),
+                metodoPagamento: "LINK",
+                ultimoPagamentoRecebido: new Date()
+            }
+        });
+        const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || "");
+        registrarCreditoRemoto("LINK", ip, maquina.id, String(link.valor));
+        // 🔥 marca como usado
+        await prisma.pix_Link.update({
+            where: { id },
+            data: { usado: true }
+        });
+        console.log(`🔗 CRÉDITO POR LINK OK`);
+        return res.json({ sucesso: true });
+    }
+    catch (err) {
+        console.error("❌ ERRO:", err);
+        return res.status(500).json({ error: "Erro ao usar link" });
+    }
+});
+app.get("/link/:id", async (req, res) => {
+    try {
+        const { id } = req.params;
+        const link = await prisma.pix_Link.findUnique({
+            where: { id }
+        });
+        if (!link) {
+            return res.status(404).json({ error: "Link não encontrado" });
+        }
+        const limite = new Date(Date.now() - LINK_EXPIRACAO_MS);
+        if (!link.createdAt || link.createdAt < limite) {
+            try {
+                await prisma.pix_Link.delete({ where: { id } });
+            }
+            catch (e) { }
+            return res.status(400).json({ error: "Link expirado" });
+        }
+        if (link.usado) {
+            return res.status(400).json({ error: "Link já utilizado" });
+        }
+        const maquina = await prisma.pix_Maquina.findUnique({
+            where: { id: link.maquinaId }
+        });
+        if (!maquina) {
+            return res.status(404).json({ error: "Máquina não encontrada" });
+        }
+        let status = "OFFLINE";
+        if (maquina.ultimaRequisicao) {
+            status =
+                tempoOffline(maquina.ultimaRequisicao) > 60
+                    ? "OFFLINE"
+                    : "ONLINE";
+        }
+        return res.json({
+            valor: link.valor,
+            maquina: maquina.nome,
+            status
+        });
+    }
+    catch (err) {
+        console.error(err);
+        return res.status(500).json({ error: "Erro ao buscar link" });
     }
 });
 //git add . 
