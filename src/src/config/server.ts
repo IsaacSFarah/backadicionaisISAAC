@@ -1366,28 +1366,104 @@ app.post("/maquina-cliente", verifyJWT, async (req: any, res) => {
 
 app.put('/recuperar-id-maquina/:id', verifyJwtPessoa, async (req, res) => {
   const { id } = req.params;
-  const { novoId } = req.body;
+  const novoId = String(req.body?.novoId ?? "").trim();
 
   try {
-    // Verifica se a máquina com o ID atual existe
-    const maquinaExistente = await prisma.pix_Maquina.findUnique({
-      where: { id },
-    });
-
-    if (!maquinaExistente) {
-      return res.status(404).json({ error: 'Máquina não encontrada' });
+    if (!novoId) {
+      return res.status(400).json({ error: "novoId é obrigatório" });
     }
 
-    // Atualiza o ID da máquina
-    const maquinaAtualizada = await prisma.pix_Maquina.update({
-      where: { id },
-      data: { id: novoId },
-    });
+    const uuidRegex =
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
-    res.json({ message: 'ID da máquina atualizado com sucesso', maquina: maquinaAtualizada });
-  } catch (error) {
-    console.error('Erro ao alterar o ID da máquina:', error);
-    res.status(500).json({ error: 'Erro ao alterar o ID da máquina' });
+    if (!uuidRegex.test(id) || !uuidRegex.test(novoId)) {
+      return res.status(400).json({ error: "id e novoId precisam ser UUID" });
+    }
+
+    if (id === novoId) {
+      const maquinaAtual = await prisma.pix_Maquina.findUnique({ where: { id } });
+      if (!maquinaAtual) {
+        return res.status(404).json({ error: "Máquina não encontrada" });
+      }
+      return res.json({ message: "ID da máquina atualizado com sucesso", maquina: maquinaAtual });
+    }
+
+    const maquinaExistente = await prisma.pix_Maquina.findUnique({ where: { id } });
+    if (!maquinaExistente) {
+      return res.status(404).json({ error: "Máquina não encontrada" });
+    }
+
+    const maquinaComNovoId = await prisma.pix_Maquina.findUnique({
+      where: { id: novoId },
+      select: { id: true },
+    });
+    if (maquinaComNovoId) {
+      return res.status(400).json({ error: "Já existe uma máquina com esse novo ID" });
+    }
+
+    await prisma.$transaction([
+      prisma.pix_Maquina.create({
+        data: {
+          id: novoId,
+          pessoaId: maquinaExistente.pessoaId,
+          clienteId: maquinaExistente.clienteId,
+          nome: maquinaExistente.nome,
+          descricao: maquinaExistente.descricao,
+          store_id: null,
+          maquininha_serial: null,
+          estoque: maquinaExistente.estoque,
+          valorDoPix: maquinaExistente.valorDoPix,
+          valorDoPulso: maquinaExistente.valorDoPulso,
+          dataInclusao: maquinaExistente.dataInclusao,
+          ultimoPagamentoRecebido: maquinaExistente.ultimoPagamentoRecebido,
+          ultimaRequisicao: maquinaExistente.ultimaRequisicao,
+          nivelDeSinal: maquinaExistente.nivelDeSinal,
+          bonusRegras: maquinaExistente.bonusRegras ?? undefined,
+          bonusAtivo: maquinaExistente.bonusAtivo,
+          bonusMetodos: maquinaExistente.bonusMetodos ?? undefined,
+          metodoPagamento: maquinaExistente.metodoPagamento,
+        },
+      }),
+      prisma.pix_Pagamento.updateMany({
+        where: { maquinaId: id },
+        data: { maquinaId: novoId },
+      }),
+      prisma.pix_Link.updateMany({
+        where: { maquinaId: id },
+        data: { maquinaId: novoId },
+      }),
+      prisma.monitoramento.updateMany({
+        where: { maquinaId: id },
+        data: { maquinaId: novoId },
+      }),
+      prisma.creditoRemoto.updateMany({
+        where: { idMaquina: id },
+        data: { idMaquina: novoId },
+      }),
+      prisma.configuracaoMaquina.updateMany({
+        where: { idMaquina: id },
+        data: { idMaquina: novoId },
+      }),
+      prisma.pix_Maquina.delete({
+        where: { id },
+      }),
+      prisma.pix_Maquina.update({
+        where: { id: novoId },
+        data: {
+          store_id: maquinaExistente.store_id,
+          maquininha_serial: maquinaExistente.maquininha_serial,
+        },
+      }),
+    ]);
+
+    const maquinaAtualizada = await prisma.pix_Maquina.findUnique({ where: { id: novoId } });
+    res.json({ message: "ID da máquina atualizado com sucesso", maquina: maquinaAtualizada });
+  } catch (error: any) {
+    console.error("Erro ao alterar o ID da máquina:", error);
+    if (error?.code === "P2002") {
+      return res.status(400).json({ error: "Conflito ao alterar o ID da máquina" });
+    }
+    res.status(500).json({ error: "Erro ao alterar o ID da máquina" });
   }
 });
 
