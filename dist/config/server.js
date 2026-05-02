@@ -147,13 +147,11 @@ function verifyJWT2(req, res, next) {
 function verifyJwtPessoa(req, res, next) {
     const token = req.headers['x-access-token'];
     if (!token) {
-        console.log(`[auth-adm] 401 token ausente path=${req.path}`);
         res.status(401).json({ error: 'Token não fornecido' });
         return;
     }
     jsonwebtoken_1.default.verify(token, SECRET_PESSOA, (err, decoded) => {
         if (err) {
-            console.log(`[auth-adm] 401 token inválido path=${req.path}`);
             res.status(401).json({
                 error: 'Token inválido ou expirado. Certifique-se de adicionar um parâmetro de cabeçalho chamado x-access-token com o token fornecido quando um email para redefinir a senha foi enviado.'
             });
@@ -1120,51 +1118,25 @@ app.post("/maquina-cliente", verifyJWT, async (req, res) => {
 });
 app.put('/recuperar-id-maquina/:id', verifyJwtPessoa, async (req, res) => {
     const { id } = req.params;
-    const novoId = String(req.body?.novoId ?? "").trim();
+    const { novoId } = req.body;
     try {
-        console.log(`[trocar-id] start id=${id} novoId=${novoId}`);
-        if (!novoId) {
-            console.log(`[trocar-id] 400 novoId obrigatório id=${id}`);
-            return res.status(400).json({ error: "novoId é obrigatório" });
-        }
-        const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-        if (!uuidRegex.test(id)) {
-            console.log(`[trocar-id] 400 id inválido id=${id}`);
-            return res.status(400).json({ error: "id inválido" });
-        }
-        const maquinaExistente = await prisma.pix_Maquina.findUnique({ where: { id } });
+        // Verifica se a máquina com o ID atual existe
+        const maquinaExistente = await prisma.pix_Maquina.findUnique({
+            where: { id },
+        });
         if (!maquinaExistente) {
-            console.log(`[trocar-id] 404 máquina não encontrada id=${id}`);
-            return res.status(404).json({ error: "Máquina não encontrada" });
+            return res.status(404).json({ error: 'Máquina não encontrada' });
         }
-        const maquinaComMesmoNovoId = await prisma.pix_Maquina.findFirst({
-            where: {
-                maquininha_serial: novoId,
-                NOT: { id: maquinaExistente.id },
-            },
-            select: { id: true },
-        });
-        if (maquinaComMesmoNovoId) {
-            console.log(`[trocar-id] 400 conflito novoId já usado id=${id} novoId=${novoId}`);
-            return res.status(400).json({ error: "Já existe uma máquina com esse ID" });
-        }
+        // Atualiza o ID da máquina
         const maquinaAtualizada = await prisma.pix_Maquina.update({
-            where: { id: maquinaExistente.id },
-            data: { maquininha_serial: novoId },
+            where: { id },
+            data: { id: novoId },
         });
-        delete cache[maquinaExistente.clienteId];
-        delete cacheTime[maquinaExistente.clienteId];
-        console.log(`[trocar-id] ok id=${id} novoId=${novoId}`);
-        res.json({ message: "ID da máquina atualizado com sucesso", maquina: maquinaAtualizada });
+        res.json({ message: 'ID da máquina atualizado com sucesso', maquina: maquinaAtualizada });
     }
     catch (error) {
-        console.error("Erro ao alterar o ID da máquina:", error);
-        if (error?.code === "P2002") {
-            console.log(`[trocar-id] 400 prisma P2002 id=${id} novoId=${novoId}`);
-            return res.status(400).json({ error: "Conflito ao alterar o ID da máquina" });
-        }
-        console.log(`[trocar-id] 500 id=${id} novoId=${novoId}`);
-        res.status(500).json({ error: "Erro ao alterar o ID da máquina" });
+        console.error('Erro ao alterar o ID da máquina:', error);
+        res.status(500).json({ error: 'Erro ao alterar o ID da máquina' });
     }
 });
 //alterar máquina
