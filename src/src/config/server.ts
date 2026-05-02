@@ -1369,6 +1369,7 @@ app.put('/recuperar-id-maquina/:id', verifyJwtPessoa, async (req, res) => {
   const novoId = String(req.body?.novoId ?? "").trim();
 
   try {
+    console.log(`[trocar-id] id=${id} novoId=${novoId}`);
     if (!novoId) {
       return res.status(400).json({ error: "novoId é obrigatório" });
     }
@@ -1379,92 +1380,30 @@ app.put('/recuperar-id-maquina/:id', verifyJwtPessoa, async (req, res) => {
       return res.status(400).json({ error: "ID atual inválido" });
     }
 
-    if (!uuidRegex.test(novoId)) {
-      return res.status(400).json({ error: "novoId inválido (precisa ser UUID)" });
-    }
-
-    if (id === novoId) {
-      const maquinaAtual = await prisma.pix_Maquina.findUnique({ where: { id } });
-      if (!maquinaAtual) {
-        return res.status(404).json({ error: "Máquina não encontrada" });
-      }
-      return res.json({ message: "ID da máquina atualizado com sucesso", maquina: maquinaAtual });
-    }
-
     const maquinaExistente = await prisma.pix_Maquina.findUnique({ where: { id } });
 
     if (!maquinaExistente) {
       return res.status(404).json({ error: "Máquina não encontrada" });
     }
 
-    const maquinaComNovoId = await prisma.pix_Maquina.findUnique({
-      where: { id: novoId },
+    const maquinaComMesmoNovoId = await prisma.pix_Maquina.findFirst({
+      where: {
+        maquininha_serial: novoId,
+        NOT: { id: maquinaExistente.id },
+      },
       select: { id: true },
     });
 
-    if (maquinaComNovoId) {
-      return res.status(400).json({ error: "Já existe uma máquina com esse novo ID" });
+    if (maquinaComMesmoNovoId) {
+      return res.status(400).json({ error: "Já existe uma máquina com esse ID" });
     }
 
-    await prisma.$transaction([
-      prisma.pix_Maquina.create({
-        data: {
-          id: novoId,
-          pessoaId: maquinaExistente.pessoaId,
-          clienteId: maquinaExistente.clienteId,
-          nome: maquinaExistente.nome,
-          descricao: maquinaExistente.descricao,
-          store_id: null,
-          maquininha_serial: null,
-          estoque: maquinaExistente.estoque,
-          valorDoPix: maquinaExistente.valorDoPix,
-          valorDoPulso: maquinaExistente.valorDoPulso,
-          dataInclusao: maquinaExistente.dataInclusao,
-          ultimoPagamentoRecebido: maquinaExistente.ultimoPagamentoRecebido,
-          ultimaRequisicao: maquinaExistente.ultimaRequisicao,
-          nivelDeSinal: maquinaExistente.nivelDeSinal,
-          bonusRegras: maquinaExistente.bonusRegras ?? undefined,
-          bonusAtivo: maquinaExistente.bonusAtivo,
-          bonusMetodos: maquinaExistente.bonusMetodos ?? undefined,
-          metodoPagamento: maquinaExistente.metodoPagamento,
-        },
-      }),
-      prisma.pix_Pagamento.updateMany({
-        where: { maquinaId: id },
-        data: { maquinaId: novoId },
-      }),
-      prisma.pix_Link.updateMany({
-        where: { maquinaId: id },
-        data: { maquinaId: novoId },
-      }),
-      prisma.monitoramento.updateMany({
-        where: { maquinaId: id },
-        data: { maquinaId: novoId },
-      }),
-      prisma.creditoRemoto.updateMany({
-        where: { idMaquina: id },
-        data: { idMaquina: novoId },
-      }),
-      prisma.configuracaoMaquina.updateMany({
-        where: { idMaquina: id },
-        data: { idMaquina: novoId },
-      }),
-      prisma.pix_Maquina.delete({
-        where: { id },
-      }),
-      prisma.pix_Maquina.update({
-        where: { id: novoId },
-        data: {
-          store_id: maquinaExistente.store_id,
-          maquininha_serial: maquinaExistente.maquininha_serial,
-        },
-      }),
-    ]);
-
-    const maquinaAtualizada = await prisma.pix_Maquina.findUnique({
-      where: { id: novoId },
+    const maquinaAtualizada = await prisma.pix_Maquina.update({
+      where: { id: maquinaExistente.id },
+      data: { maquininha_serial: novoId },
     });
 
+    console.log(`[trocar-id] sucesso id=${id} novoId=${novoId}`);
     res.json({ message: "ID da máquina atualizado com sucesso", maquina: maquinaAtualizada });
   } catch (error: any) {
     console.error('Erro ao alterar o ID da máquina:', error);
