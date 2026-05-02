@@ -1366,50 +1366,24 @@ app.post("/maquina-cliente", verifyJWT, async (req: any, res) => {
 
 app.put('/recuperar-id-maquina/:id', verifyJwtPessoa, async (req, res) => {
   const { id } = req.params;
-  const novoId = String(req.body?.novoId ?? "").trim();
+  const { novoId } = req.body;
 
   try {
-    console.log(`[trocar-id] id=${id} novoId=${novoId}`);
-    if (!novoId) {
-      return res.status(400).json({ error: "novoId é obrigatório" });
-    }
-
-    const uuidRegex =
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    const maquinaExistente = uuidRegex.test(id)
-      ? await prisma.pix_Maquina.findUnique({ where: { id } })
-      : await prisma.pix_Maquina.findFirst({ where: { maquininha_serial: id } });
-
+    // Verifica se a máquina com o ID atual existe
+    const maquinaExistente = await prisma.pix_Maquina.findUnique({
+      where: { id },
+    });
     if (!maquinaExistente) {
-      return res.status(404).json({ error: "Máquina não encontrada" });
+      return res.status(404).json({ error: 'Máquina não encontrada' });
     }
-
-    const maquinaComMesmoNovoId = await prisma.pix_Maquina.findFirst({
-      where: {
-        maquininha_serial: novoId,
-        NOT: { id: maquinaExistente.id },
-      },
-      select: { id: true },
-    });
-
-    if (maquinaComMesmoNovoId) {
-      return res.status(400).json({ error: "Já existe uma máquina com esse ID" });
-    }
-
+    // Atualiza o ID da máquina
     const maquinaAtualizada = await prisma.pix_Maquina.update({
-      where: { id: maquinaExistente.id },
-      data: { maquininha_serial: novoId },
+      where: { id },
+      data: { id: novoId },
     });
-
-    console.log(`[trocar-id] sucesso id=${id} novoId=${novoId}`);
-    delete cache[maquinaExistente.clienteId];
-    delete cacheTime[maquinaExistente.clienteId];
-    res.json({ message: "ID da máquina atualizado com sucesso", maquina: maquinaAtualizada });
-  } catch (error: any) {
+    res.json({ message: 'ID da máquina atualizado com sucesso', maquina: maquinaAtualizada });
+  } catch (error) {
     console.error('Erro ao alterar o ID da máquina:', error);
-    if (error?.code === "P2002") {
-      return res.status(400).json({ error: "Conflito ao alterar o ID da máquina" });
-    }
     res.status(500).json({ error: 'Erro ao alterar o ID da máquina' });
   }
 });
