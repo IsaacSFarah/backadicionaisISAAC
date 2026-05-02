@@ -1375,9 +1375,11 @@ app.put('/recuperar-id-maquina/:id', verifyJwtPessoa, async (req, res) => {
 
     const uuidRegex =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    const maquinaExistente = uuidRegex.test(id)
-      ? await prisma.pix_Maquina.findUnique({ where: { id } })
-      : await prisma.pix_Maquina.findFirst({ where: { maquininha_serial: id } });
+    if (!uuidRegex.test(id)) {
+      return res.status(400).json({ error: "ID atual inválido" });
+    }
+
+    const maquinaExistente = await prisma.pix_Maquina.findUnique({ where: { id } });
 
     if (!maquinaExistente) {
       return res.status(404).json({ error: "Máquina não encontrada" });
@@ -4362,26 +4364,25 @@ app.get("/pagamentos/:maquinaId", verifyJWT, async (req: any, res) => {
     let taxaCartaoCredito = 0
     let taxaCartaoDebito = 0
 
-    const uuidRegex =
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    const maquinaParam = String(req.params.maquinaId ?? "").trim();
-    const maquina = uuidRegex.test(maquinaParam)
-      ? await prisma.pix_Maquina.findUnique({ where: { id: maquinaParam } })
-      : await prisma.pix_Maquina.findFirst({ where: { maquininha_serial: maquinaParam } });
-
-    if (!maquina) {
-      return res.status(404).json({ error: 'Máquina não encontrada' });
-    }
-
     const pagamentos = await prisma.pix_Pagamento.findMany({
       where: {
-        maquinaId: maquina.id,
+        maquinaId: req.params.maquinaId,
         removido: false
       },
       orderBy: {
         data: 'desc', // 'desc' para ordem decrescente (da mais recente para a mais antiga)
       }
     });
+
+    const maquina = await prisma.pix_Maquina.findUnique({
+      where: {
+        id: req.params.maquinaId
+      }
+    });
+
+    if (!maquina) {
+      return res.status(404).json({ error: 'Máquina não encontrada' });
+    }
 
     // Verifica se o estoque está definido e retorna seu valor
     const estoque = maquina.estoque !== null ? maquina.estoque : '--';
@@ -4424,7 +4425,7 @@ app.get("/pagamentos/:maquinaId", verifyJWT, async (req: any, res) => {
 
     const especie = await prisma.pix_Pagamento.findMany({
       where: {
-        maquinaId: maquina.id,
+        maquinaId: req.params.maquinaId,
         removido: false,
         mercadoPagoId: `CASH`
       }
@@ -4613,20 +4614,9 @@ app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req: any, res) => {
     // dataInicio.setUTCHours(0, 0, 0, 0);
     // dataFim.setUTCHours(23, 59, 59, 999);
 
-    const uuidRegex =
-      /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    const maquinaParam = String(req.params.maquinaId ?? "").trim();
-    const maquina = uuidRegex.test(maquinaParam)
-      ? await prisma.pix_Maquina.findUnique({ where: { id: maquinaParam } })
-      : await prisma.pix_Maquina.findFirst({ where: { maquininha_serial: maquinaParam } });
-
-    if (!maquina) {
-      return res.status(404).json({ error: "Máquina não encontrada" });
-    }
-
     const pagamentos = await prisma.pix_Pagamento.findMany({
       where: {
-        maquinaId: maquina.id,
+        maquinaId: req.params.maquinaId,
         data: {
           gte: dataInicio,
           lte: dataFim,
@@ -4634,6 +4624,12 @@ app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req: any, res) => {
       },
       orderBy: {
         data: 'desc',
+      }
+    });
+
+    const maquina = await prisma.pix_Maquina.findUnique({
+      where: {
+        id: req.params.maquinaId
       }
     });
 
@@ -8035,4 +8031,4 @@ app.get("/link/:id", async (req, res) => {
 
 //git push 
 
-// Aplicação já está ouvindo acima; evite múltiplos a
+// Aplicação já está ouvindo acima; evite múltiplos app.listen.
