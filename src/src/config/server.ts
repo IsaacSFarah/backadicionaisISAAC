@@ -1376,11 +1376,9 @@ app.put('/recuperar-id-maquina/:id', verifyJwtPessoa, async (req, res) => {
 
     const uuidRegex =
       /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    if (!uuidRegex.test(id)) {
-      return res.status(400).json({ error: "ID atual inválido" });
-    }
-
-    const maquinaExistente = await prisma.pix_Maquina.findUnique({ where: { id } });
+    const maquinaExistente = uuidRegex.test(id)
+      ? await prisma.pix_Maquina.findUnique({ where: { id } })
+      : await prisma.pix_Maquina.findFirst({ where: { maquininha_serial: id } });
 
     if (!maquinaExistente) {
       return res.status(404).json({ error: "Máquina não encontrada" });
@@ -1404,6 +1402,8 @@ app.put('/recuperar-id-maquina/:id', verifyJwtPessoa, async (req, res) => {
     });
 
     console.log(`[trocar-id] sucesso id=${id} novoId=${novoId}`);
+    delete cache[maquinaExistente.clienteId];
+    delete cacheTime[maquinaExistente.clienteId];
     res.json({ message: "ID da máquina atualizado com sucesso", maquina: maquinaAtualizada });
   } catch (error: any) {
     console.error('Erro ao alterar o ID da máquina:', error);
