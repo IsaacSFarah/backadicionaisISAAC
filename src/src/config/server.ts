@@ -49,12 +49,20 @@ const DISCORD_WEBHOOKS = {
   ESTOQUE: "https://discord.com/api/webhooks/1338654197737979974/23nYlc_AdHjudx4PPkfVEbjoWjC9rvNkxg7B5rqhnB_Qxcu4Y-Cm1qYKgnkNiq3rtYLM",
 };
 // Flags de notificação via ambiente (evitam erros de nomes não declarados)
-const NOTIFICACOES_GERAL = process.env.NOTIFICACOES_GERAL === 'true';
-const NOTIFICACOES_CREDITO_REMOTO = process.env.NOTIFICACOES_CREDITO_REMOTO === 'true';
-const NOTIFICACOES_LOGINS = process.env.NOTIFICACOES_LOGINS === 'true';
-const NOTIFICACOES_ESTOQUE = process.env.NOTIFICACOES_ESTOQUE === 'true';
-const NOTIFICACOES_PAGAMENTOS_ESPECIE = process.env.NOTIFICACOES_PAGAMENTOS_ESPECIE === 'true';
-const NOTIFICACOES_PAGAMENTOS = process.env.NOTIFICACOES_PAGAMENTOS === 'true';
+const envBool = (raw: unknown, defaultValue: boolean) => {
+  if (raw === undefined || raw === null || raw === "") return defaultValue;
+  const v = String(raw).trim().toLowerCase();
+  if (["1", "true", "yes", "y", "on"].includes(v)) return true;
+  if (["0", "false", "no", "n", "off"].includes(v)) return false;
+  return defaultValue;
+};
+
+const NOTIFICACOES_GERAL = envBool(process.env.NOTIFICACOES_GERAL, true);
+const NOTIFICACOES_CREDITO_REMOTO = envBool(process.env.NOTIFICACOES_CREDITO_REMOTO, true);
+const NOTIFICACOES_LOGINS = envBool(process.env.NOTIFICACOES_LOGINS, true);
+const NOTIFICACOES_ESTOQUE = envBool(process.env.NOTIFICACOES_ESTOQUE, true);
+const NOTIFICACOES_PAGAMENTOS_ESPECIE = envBool(process.env.NOTIFICACOES_PAGAMENTOS_ESPECIE, true);
+const NOTIFICACOES_PAGAMENTOS = envBool(process.env.NOTIFICACOES_PAGAMENTOS, true);
 
 
 // Variáveis auxiliares (evitam erros de nomes não declarados)
