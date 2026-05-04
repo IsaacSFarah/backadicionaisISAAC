@@ -2602,6 +2602,7 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
         status,
         faturamentoHoje: faturamentoMap[maquina.id] || 0,
         faturamentoOntem: faturamentoOntemMap[maquina.id] || 0,
+        saidasHoje: saidasHojeMap[maquina.id] || 0,
         maquinaId: maquina.maquininha_serial,
         pessoaId: maquina.pessoaId,
         clienteId: maquina.clienteId,
