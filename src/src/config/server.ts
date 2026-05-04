@@ -2520,6 +2520,35 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
       faturamentoMap[p.maquinaId] += valor;
     });
 
+
+    const saidasHoje = await prisma.pix_Pagamento.findMany({
+      where: {
+        maquinaId: { in: maquinaIds },
+        tipo: "SAIDA_PRODUTO",
+        data: {
+          gte: startUTC,
+          lt: endUTC,
+        },
+      },
+      select: {
+        maquinaId: true,
+        operadora: true,
+      },
+    });
+
+    const saidasHojeMap: Record<string, number> = {};
+    const parseSaidaQuantidade = (operadora: any) => {
+      const s = String(operadora || "");
+      const m = s.match(/Saiu\s+(\d+)/i);
+      if (m && m[1]) return Number(m[1]) || 1;
+      return 1;
+    };
+
+    for (const s of saidasHoje as any[]) {
+      if (!saidasHojeMap[s.maquinaId]) saidasHojeMap[s.maquinaId] = 0;
+      saidasHojeMap[s.maquinaId] += parseSaidaQuantidade(s.operadora);
+    }
+
     const pagamentosOntem = await prisma.pix_Pagamento.findMany({
       where: {
         maquinaId: { in: maquinaIds },
