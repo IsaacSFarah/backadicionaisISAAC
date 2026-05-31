@@ -22,7 +22,7 @@ const PORT: string | number = process.env.PORT || 5001;
 const SALT_ROUNDS = 10;
 const LINK_EXPIRACAO_MS = 7 * 24 * 60 * 60 * 1000;
 const MAQUINA_OFFLINE_ESTORNO_SEGUNDOS = 60;
-const PAGAMENTO_PENDENTE_TIMEOUT_SEGUNDOS = 120;
+const PAGAMENTO_PENDENTE_TIMEOUT_SEGUNDOS = 40;
 
 // Configuração do Prisma
 const prisma = new PrismaClient();
@@ -124,14 +124,14 @@ async function processarPagamentosPendentes() {
       });
       if (jaEstornado) continue;
 
-      const estorno = await estornarMP(paymentId, tokenCliente, "nao consumido");
+      const estorno = await estornarMP(paymentId, tokenCliente, "controladora offline");
       if (!estorno) continue;
 
       await prisma.pix_Pagamento.update({
         where: { id: pagamento.id },
         data: {
           estornado: true,
-          motivoEstorno: "nao consumido",
+          motivoEstorno: "controladora offline",
           status: "ESTORNADO",
         },
       });
@@ -155,7 +155,7 @@ async function processarPagamentosPendentes() {
 
 setInterval(() => {
   void processarPagamentosPendentes();
-}, 30000);
+}, 10000);
 
 setInterval(() => {
   const limite = Date.now() - 26 * 60 * 60 * 1000;
