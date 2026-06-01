@@ -1153,7 +1153,7 @@ app.post("/funcionario", verifyJWT, async (req: any, res) => {
 
 app.put('/alterar-cliente-adm-new/:id', async (req, res) => {
   const { id } = req.params;
-  const { nome, mercadoPagoToken, pagbankToken, dataVencimento, pagbankEmail } = req.body;
+  const { nome, mercadoPagoToken, pagbankToken, dataVencimento, pagbankEmail, ativo } = req.body;
 
   try {
     // Atualiza o cliente no banco de dados
@@ -1165,6 +1165,7 @@ app.put('/alterar-cliente-adm-new/:id', async (req, res) => {
         pagbankToken, // Agora o pagbankToken também pode ser atualizado
         pagbankEmail,
         dataVencimento,
+        ativo,
       },
     });
 
@@ -3749,7 +3750,7 @@ app.post("/rota-recebimento-mercado-pago-dinamica/:id", async (req: any, res: an
       }
     }
     if (!cliente.ativo || inadimplente) {
-      const motivo = !cliente.ativo ? "cliente inativo" : "cliente inadimplente";
+      const motivo = "inadimplente";
       console.log(`🚫 ${motivo} → estorno`);
       const jaEstornado = await prisma.pix_Pagamento.findFirst({
         where: {
