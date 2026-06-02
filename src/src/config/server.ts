@@ -7239,15 +7239,6 @@ app.get("/payments-client", verifyJWT, async (req: any, res) => {
       return Number.isFinite(n) ? n : 0;
     };
 
-    const isPremioOuSaida = (pagamento: any): boolean => {
-      const tipo = String(pagamento?.tipo || "").trim().toUpperCase();
-      const mercadoPagoId = String(pagamento?.mercadoPagoId || "").trim().toLowerCase();
-      if (tipo === "SAIDA_PRODUTO") return true;
-      if (tipo === "SAIU PREMIO" || tipo === "SAIU_PREMIO") return true;
-      if (mercadoPagoId.includes("saiu premio")) return true;
-      return false;
-    };
-
     const tipoToBucket = (tipo: any): "CASH" | "PIX" | "DEBITO" | "CREDITO" | "OUTRO" => {
       const t = String(tipo || "").trim().toUpperCase();
       if (!t) return "OUTRO";
@@ -7389,7 +7380,7 @@ app.get("/payments-client", verifyJWT, async (req: any, res) => {
     });
 
     for (const pagamento of pagamentos) {
-      if (isPremioOuSaida(pagamento)) {
+      if (pagamento?.tipo === "SAIDA_PRODUTO" || pagamento?.mercadoPagoId === "saiu premio") {
         continue;
       }
       const valor = parseMoney(pagamento.valor);
@@ -7425,10 +7416,6 @@ app.get("/payments-client", verifyJWT, async (req: any, res) => {
         tipo: {
           not: 'SAIDA_PRODUTO',
         },
-        NOT: [
-          { mercadoPagoId: { contains: "saiu premio", mode: "insensitive" } },
-          { tipo: { contains: "saiu premio", mode: "insensitive" } },
-        ],
       },
       orderBy: {
         data: "desc", // Ordena por data, mais recentes primeiro
