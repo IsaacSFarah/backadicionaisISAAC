@@ -7204,22 +7204,54 @@ app.get("/machines-client", verifyJWT, async (req: any, res) => {
 app.get("/payments-client", verifyJWT, async (req: any, res) => {
   try {
     const { filtro, dataInicio, dataFim, maquinaId } = req.query;
-    let valorTotal: number = 0;
-    let valorPix = 0
-    let valorCartaoCredito = 0
-    let valorCartaoDebito = 0
-    let valorCash = 0
-    let qtd = 0
+    let valorTotal = 0;
+    let valorPix = 0;
+    let valorCartaoCredito = 0;
+    let valorCartaoDebito = 0;
+    let valorCash = 0;
+    let qtd = 0;
 
-    let totalEstorno = 0
-    let totalSemEstorno = 0
-    let totalBruto = 0
-    let totalLiquido = 0
+    let totalEstorno = 0;
+    let totalTaxas = 0;
+    let totalSemEstorno = 0;
+    let totalBruto = 0;
+    let totalLiquido = 0;
 
-    // Filtros dinâmicos
-    const where: any = {
+    const parseMoney = (raw: any): number => {
+      if (raw === null || raw === undefined) return 0;
+      let s = String(raw).trim();
+      if (!s) return 0;
+      s = s.replace(/^R\$\s*/i, "").replace(/\s/g, "");
+      if (s.includes(",")) {
+        s = s.replace(/\./g, "").replace(",", ".");
+      } else {
+        const dotMatches = s.match(/\./g) || [];
+        if (dotMatches.length > 1) {
+          s = s.replace(/\./g, "");
+        } else if (dotMatches.length === 1) {
+          const parts = s.split(".");
+          if (parts.length === 2 && parts[1].length === 3) {
+            s = parts[0] + parts[1];
+          }
+        }
+      }
+      const n = Number.parseFloat(s);
+      return Number.isFinite(n) ? n : 0;
+    };
+
+    const tipoToBucket = (tipo: any): "CASH" | "PIX" | "DEBITO" | "CREDITO" | "OUTRO" => {
+      const t = String(tipo || "").trim().toUpperCase();
+      if (!t) return "OUTRO";
+      if (t === "CASH") return "CASH";
+      if (t === "BANK_TRANSFER" || t === "PIX" || t === "11") return "PIX";
+      if (t === "DEBIT_CARD" || t === "DEBITO" || t === "8") return "DEBITO";
+      if (t === "CREDIT_CARD" || t === "CREDITO" || t === "1") return "CREDITO";
+      return "OUTRO";
+    };
+
+    const whereBase: any = {
       maquinaId: maquinaId,
-      estornado: false,
+      removido: false,
     };
 
     const agora = new Date();
@@ -7336,45 +7368,51 @@ app.get("/payments-client", verifyJWT, async (req: any, res) => {
 
     // Adiciona o filtro de data se houver (exceto no caso de 'todos')
     if (inicioFiltro && fimFiltro) {
-      where.data = {
+      whereBase.data = {
         gte: inicioFiltro,
-        lte: fimFiltro,
+        lt: fimFiltro,
       };
     }
 
     // Busca todos os pagamentos de acordo com os filtros aplicados para a soma
     const pagamentos = await prisma.pix_Pagamento.findMany({
-      where: where,
+      where: whereBase,
     });
 
     for (const pagamento of pagamentos) {
       if (pagamento?.tipo === "SAIDA_PRODUTO" || pagamento?.mercadoPagoId === "saiu premio") {
         continue;
       }
-      if (pagamento.tipo === "CASH") {
-        valorCash += parseFloat(pagamento.valor)
-      } else if (pagamento.tipo === "bank_transfer") {
-        valorPix += parseFloat(pagamento.valor)
-      } else if (pagamento.tipo === "debit_card") {
-        valorCartaoDebito += parseFloat(pagamento.valor)
-      } else if (pagamento.tipo === "credit_card") {
-        valorCartaoCredito += parseFloat(pagamento.valor)
-      }
+      const valor = parseMoney(pagamento.valor);
+      const taxa = parseMoney(pagamento.taxas);
+
       qtd += 1;
-      valorTotal += parseFloat(pagamento.valor);
+
       if (pagamento.estornado === true) {
-        totalEstorno += parseFloat(pagamento.valor)
-      } else {
-        totalSemEstorno += parseFloat(pagamento.valor)
+        totalEstorno += valor;
+        continue;
       }
-      totalBruto = totalEstorno + totalSemEstorno
-      totalLiquido = totalSemEstorno
+
+      totalSemEstorno += valor;
+      totalTaxas += taxa;
+
+      const bucket = tipoToBucket(pagamento.tipo);
+      if (bucket === "CASH") valorCash += valor;
+      else if (bucket === "PIX") valorPix += valor;
+      else if (bucket === "DEBITO") valorCartaoDebito += valor;
+      else if (bucket === "CREDITO") valorCartaoCredito += valor;
     }
+
+    totalBruto = totalSemEstorno;
+    totalLiquido = totalSemEstorno - totalTaxas;
+    if (totalLiquido < 0) totalLiquido = 0;
+    valorTotal = totalBruto;
 
     // Busca os 10 pagamentos mais recentes de acordo com os filtros aplicados e inclui nome e descrição da máquina
     const pagamentosRecentes = await prisma.pix_Pagamento.findMany({
       where: {
-        ...where,
+        ...whereBase,
+        estornado: false,
         tipo: {
           not: 'SAIDA_PRODUTO',
         },
@@ -7402,16 +7440,16 @@ app.get("/payments-client", verifyJWT, async (req: any, res) => {
 
     // Retorna o somatório dos valores dos pagamentos e os 10 pagamentos mais recentes
     return res.status(200).json({
-      soma: valorTotal.toFixed(2), // Retorna o valor formatado com 2 casas decimais
-      totalBruto: totalBruto,
-      totalLiquido: totalLiquido,
-      totalEstorno: totalEstorno,
-      valorCartaoCredito: valorCartaoCredito,
-      valorCartaoDebito: valorCartaoDebito,
-      valorPix: valorPix,
-      valorCash: valorCash,
+      soma: valorTotal.toFixed(2),
+      totalBruto: Number(totalBruto.toFixed(2)),
+      totalLiquido: Number(totalLiquido.toFixed(2)),
+      totalEstorno: Number(totalEstorno.toFixed(2)),
+      valorCartaoCredito: Number(valorCartaoCredito.toFixed(2)),
+      valorCartaoDebito: Number(valorCartaoDebito.toFixed(2)),
+      valorPix: Number(valorPix.toFixed(2)),
+      valorCash: Number(valorCash.toFixed(2)),
       qtd: qtd,
-      valorTotal: valorTotal,
+      valorTotal: Number(valorTotal.toFixed(2)),
       pagamentosRecentes: pagamentosRecentes.map(pagamento => ({
         id: pagamento.id,
         valor: pagamento.valor,
