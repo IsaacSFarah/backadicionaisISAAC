@@ -4604,9 +4604,10 @@ app.get("/pagamentos/:maquinaId", verifyJWT, async (req: any, res) => {
         continue;
       }
 
-      if (pagamento.tipo === "CASH") {
+      if (pagamento.tipo === "CASH" || pagamento.mercadoPagoId === "CASH") {
+        totalEspecie += parseFloat(pagamento.valor)
         valorCash += parseFloat(pagamento.valor)
-      } else if (pagamento.tipo === "bank_transfer") {
+      } else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money") {
         valorPix += parseFloat(pagamento.valor)
         taxaPix += parseFloat(pagamento.taxas!)
       } else if (pagamento.tipo === "debit_card") {
@@ -4627,21 +4628,7 @@ app.get("/pagamentos/:maquinaId", verifyJWT, async (req: any, res) => {
         totalComEstorno += valor;
       }
       totalBruto = totalComEstorno + totalSemEstorno
-      totalLiquido = totalSemEstorno
-    }
-
-    const especie = await prisma.pix_Pagamento.findMany({
-      where: {
-        maquinaId: req.params.maquinaId,
-        removido: false,
-        mercadoPagoId: `CASH`
-      }
-    });
-
-    for (const e of especie) {
-      const valor = parseFloat(e.valor);
-      totalEspecie += valor;
-
+      totalLiquido = totalSemEstorno - (taxaCartaoCredito + taxaCartaoDebito + taxaPix)
     }
 
     return res.status(200).json({
@@ -4851,14 +4838,10 @@ app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req: any, res) => {
         continue;
       }
 
-      if (pagamento.mercadoPagoId === 'CASH') {
-        const valor = parseFloat(pagamento.valor);
-        totalEspecie += valor;
-      }
-
-      if (pagamento.tipo === "CASH") {
+      if (pagamento.tipo === "CASH" || pagamento.mercadoPagoId === "CASH") {
+        totalEspecie += parseFloat(pagamento.valor)
         valorCash += parseFloat(pagamento.valor)
-      } else if (pagamento.tipo === "bank_transfer") {
+      } else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money") {
         valorPix += parseFloat(pagamento.valor)
         taxaPix += parseFloat(pagamento.taxas!)
       } else if (pagamento.tipo === "debit_card") {
@@ -4879,7 +4862,7 @@ app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req: any, res) => {
         totalComEstorno += valor;
       }
       totalBruto = totalComEstorno + totalSemEstorno
-      totalLiquido = totalSemEstorno
+      totalLiquido = totalSemEstorno - (taxaCartaoCredito + taxaCartaoDebito + taxaPix)
     }
 
     // const especie = await prisma.pix_Pagamento.findMany({
