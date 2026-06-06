@@ -8054,6 +8054,53 @@ app.get("/auditoria-pagamentos-detalhe/:id", verifyJwtPessoa, async (req: any, r
   }
 });
 
+app.get("/pagamento-detalhe/:id", verifyJWT, async (req: any, res) => {
+  try {
+    const pagamento = await prisma.pix_Pagamento.findUnique({
+      where: { id: req.params.id },
+      include: { cliente: true }
+    });
+
+    if (!pagamento) {
+      return res.status(404).json({ error: "Pagamento não encontrado" });
+    }
+
+    if (!pagamento.clienteId || pagamento.clienteId !== req.userId) {
+      return res.status(403).json({ error: "Sem permissão" });
+    }
+
+    const mpId = String(pagamento.mercadoPagoId || "");
+    if (!mpId || mpId === "CASH" || mpId === "saiu premio") {
+      return res.status(200).json({
+        erro: false,
+        pagamento
+      });
+    }
+
+    const tokenMp = pagamento.cliente?.mercadoPagoToken;
+    if (!tokenMp) {
+      return res.status(200).json({
+        erro: true,
+        msg: "Token Mercado Pago não configurado"
+      });
+    }
+
+    const url = "https://api.mercadopago.com/v1/payments/" + mpId;
+    const resMp: any = await axios.get(url, {
+      headers: { Authorization: `Bearer ${tokenMp}` }
+    });
+
+    return res.status(200).json({
+      erro: false,
+      pagamento,
+      mercadopago: resMp.data
+    });
+  } catch (err: any) {
+    console.error(err);
+    return res.status(500).json({ retorno: "ERRO" });
+  }
+});
+
 app.post("/gerar-link", verifyJWT, async (req: any, res) => {
   try {
     console.log("🔥 GERAR LINK CHAMADO");
