@@ -39,7 +39,7 @@
     "xml2js": "^0.6.2"
   },
   "engines": {
-    "node": "20.x",
+    "node": "24.x",
     "npm": ">=7.0.0"
   },
   "devDependencies": {
@@ -49,5 +49,8 @@
     "@types/pg": "^8.15.5",
     "@types/xml2js": "^0.4.14",
     "prisma": "^6.0.0"
+  },
+  "optionalDependencies": {
+    "fsevents": "^2.3.3"
   }
 }
