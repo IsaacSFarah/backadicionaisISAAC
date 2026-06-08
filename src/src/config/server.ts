@@ -65,6 +65,26 @@ const NOTIFICACOES_ESTOQUE = envBool(process.env.NOTIFICACOES_ESTOQUE, true);
 const NOTIFICACOES_PAGAMENTOS_ESPECIE = envBool(process.env.NOTIFICACOES_PAGAMENTOS_ESPECIE, true);
 const NOTIFICACOES_PAGAMENTOS = envBool(process.env.NOTIFICACOES_PAGAMENTOS, true);
 
+function isInadimplente(dataVencimento?: Date | null) {
+  if (!dataVencimento) return false;
+  const diferencaEmMilissegundos = new Date().getTime() - dataVencimento.getTime();
+  const diferencaEmDias = Math.floor(diferencaEmMilissegundos / (1000 * 60 * 60 * 24));
+  return diferencaEmDias > 10;
+}
+
+async function getBloqueioCliente(clienteId: string) {
+  const cliente = await prisma.pix_Cliente.findUnique({
+    where: { id: clienteId },
+    select: { ativo: true, dataVencimento: true, nome: true },
+  });
+  if (!cliente) return { bloqueado: true, motivo: "CLIENTE_NAO_ENCONTRADO", cliente };
+  if (!cliente.ativo) return { bloqueado: true, motivo: "CLIENTE_INATIVO", cliente };
+  if (isInadimplente(cliente.dataVencimento)) {
+    return { bloqueado: true, motivo: "CLIENTE_INADIMPLENTE", cliente };
+  }
+  return { bloqueado: false, motivo: "", cliente };
+}
+
 
 // Variáveis auxiliares (evitam erros de nomes não declarados)
 let ultimoAcessoMaquina01: Date | null = null;
@@ -2046,15 +2066,27 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
 
     if (maquina) {
 
+      const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
+      const sinalInt =
+        nivelDeSinal != undefined ? parseInt(String(nivelDeSinal)) : null;
+      if (bloqueio.bloqueado) {
+        await prisma.pix_Maquina.update({
+          where: { id: maquinaId },
+          data: {
+            valorDoPix: "0",
+            ultimaRequisicao: new Date(),
+            nivelDeSinal: sinalInt,
+          },
+        });
+        return res.status(200).json({ retorno: "0000" });
+      }
+
       // 🔢 CONVERTE PIX EM PULSOS COM LÓGICA DE BÔNUS DINÂMICO DA MÁQUINA
 
 
       const valorPixAtualStr = String(maquina.valorDoPix || "0");
       const valorPixAtual = parseFloat(valorPixAtualStr);
       const valorPorPulso = parseFloat(maquina.valorDoPulso || "1");
-
-      const sinalInt =
-        nivelDeSinal != undefined ? parseInt(String(nivelDeSinal)) : null;
 
       const semCredito =
         !valorPixAtual ||
@@ -2221,7 +2253,7 @@ app.post("/credito-remoto", verifyJwtPessoa, async (req: any, res) => {
     //VERIFICANDO SE A MÁQUINA PERTENCE A UM CIENTE ATIVO 
     if (maquina != null) {
       if (maquina.cliente !== null && maquina.cliente !== undefined) {
-        if (maquina.cliente.ativo) {
+        if (maquina.cliente.ativo && !isInadimplente(maquina.cliente.dataVencimento)) {
           console.log("Cliente ativo - seguindo...");
         } else {
           console.log("Cliente inativo - parando...");
@@ -2298,7 +2330,7 @@ app.post("/credito-remoto-cliente", verifyJWT, async (req: any, res) => {
     //VERIFICANDO SE A MÁQUINA PERTENCE A UM CIENTE ATIVO 
     if (maquina != null) {
       if (maquina.cliente !== null && maquina.cliente !== undefined) {
-        if (maquina.cliente.ativo) {
+        if (maquina.cliente.ativo && !isInadimplente(maquina.cliente.dataVencimento)) {
           console.log("Cliente ativo - seguindo...");
         } else {
           console.log("Cliente inativo - parando...");
@@ -4296,6 +4328,10 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
     const value = Number(req.query.valor);
 
     if (maquina) {
+      const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
+      if (bloqueio.bloqueado) {
+        return res.status(403).json({ retorno: "CLIENTE_BLOQUEADO" });
+      }
 
       const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || "");
       console.log(`
@@ -4362,39 +4398,7 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
         });
       }
 
-      // 🔥 REGISTRO (MANTIDO)
-      const novoPagamento = await prisma.pix_Pagamento.create({
-        data: {
-          maquinaId: maquina.id,
-          valor: String(value),
-          mercadoPagoId: "CASH",
-          motivoEstorno: podeLiberarEspecie ? `Observação: 1 nota de ${valorNotaTexto}` : ``,
-          tipo: "CASH",
-          estornado: false,
-          clienteId: maquina.clienteId,
-          valorBonus: podeLiberarEspecie && bonusExtra > 0 ? bonusExtra : 0,
-        },
-      });
-
-      console.log(`
-💰 PAGAMENTO REGISTRADO (ESPÉCIE)
-👤 Cliente: ${maquina?.cliente?.nome || ""} (${maquina.clienteId})
-🏪 Máquina: ${maquina.nome} (${maquina.id})
-💵 Valor: ${valorNotaTexto}
-🎁 Bônus em espécie: ${podeLiberarEspecie ? "SIM" : "NÃO"}
-🎯 Bônus extra: ${bonusExtra}
-📝 ${novoPagamento.motivoEstorno || ""}
-`);
-
-      if (NOTIFICACOES_PAGAMENTOS_ESPECIE) {
-        notificarDiscord(
-          DISCORD_WEBHOOKS.PAGAMENTOS_ESPECIE,
-          `Novo pagamento recebido. R$: ${novoPagamento.valor.toString()}`,
-          `Maquina: ${maquina?.nome}. Descrição: ${maquina?.descricao}`
-        );
-      }
-
-      return res.status(200).json({ "pagamento registrado": "Pagamento registrado" });
+      return res.status(200).json({ retorno: "OK" });
 
     } else {
       console.log("error.. máquina não encontrada!");
