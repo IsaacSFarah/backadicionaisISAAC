@@ -99,7 +99,10 @@ const processandoWebhooks = new Set<string>();
 const espInFlight = new Set<string>();
 const espUltimoHeartbeat = new Map<string, number>();
 const monitoramentoCache = new Map<string, number>();
+const dashboardCache = new Map<string, { data: any; expiresAt: number; lastAccessAt: number }>();
 const ESP_HEARTBEAT_WRITE_MS = 30000;
+const DASHBOARD_CACHE_TTL_MS = 30000;
+const DASHBOARD_CACHE_MAX_ITEMS = 500;
 let processandoPagamentosPendentes = false;
 
 // 🔥 LIMPEZA AUTOMÁTICA (IMPORTANTE)
@@ -107,6 +110,36 @@ setInterval(() => {
   console.log("🧹 Limpando cache de webhooks...");
   processandoWebhooks.clear();
 }, 10 * 60 * 1000); // 10 minutos
+
+function getDashboardCache(userId: string) {
+  const entry = dashboardCache.get(userId);
+  if (!entry) return null;
+  if (Date.now() > entry.expiresAt) {
+    dashboardCache.delete(userId);
+    return null;
+  }
+  entry.lastAccessAt = Date.now();
+  return entry.data;
+}
+
+function setDashboardCache(userId: string, data: any) {
+  const now = Date.now();
+  dashboardCache.set(userId, {
+    data,
+    expiresAt: now + DASHBOARD_CACHE_TTL_MS,
+    lastAccessAt: now,
+  });
+
+  if (dashboardCache.size <= DASHBOARD_CACHE_MAX_ITEMS) return;
+
+  const ordered = [...dashboardCache.entries()].sort(
+    (a, b) => a[1].lastAccessAt - b[1].lastAccessAt
+  );
+  const excesso = dashboardCache.size - DASHBOARD_CACHE_MAX_ITEMS;
+  for (let i = 0; i < excesso; i++) {
+    dashboardCache.delete(ordered[i][0]);
+  }
+}
 
 async function processarPagamentosPendentes() {
   if (processandoPagamentosPendentes) return;
@@ -186,6 +219,15 @@ setInterval(() => {
     if (ts < limite) espUltimoHeartbeat.delete(k);
   }
 }, 60 * 60 * 1000);
+
+setInterval(() => {
+  const agora = Date.now();
+  for (const [k, entry] of dashboardCache) {
+    if (agora > entry.expiresAt) {
+      dashboardCache.delete(k);
+    }
+  }
+}, 5 * 60 * 1000);
 
 async function limparLinksExpirados() {
   const limite = new Date(Date.now() - LINK_EXPIRACAO_MS);
@@ -917,8 +959,7 @@ app.post("/rota-recebimento-mercado-pago", async (req: any, res: any) => {
         ultimoPagamentoRecebido: new Date()
       }
     });
-    delete cache[maquina.clienteId];
-    delete cacheTime[maquina.clienteId];
+    dashboardCache.delete(String(maquina.clienteId));
 
     valorDoPixMaquina01 = response.data.transaction_amount;
     valordoPixPlaquinhaPixMP = response.data.transaction_amount;
@@ -2569,11 +2610,6 @@ app.post("/login-funcionario", async (req, res) => {
 });
 
 
-//maquinas exibir as máquinas de um cliente logado
-// 🔥 CACHE GLOBAL
-const cache: Record<string, any> = {};
-const cacheTime: Record<string, number> = {};
-
 app.get("/maquinas", verifyJWT, async (req: any, res) => {
 
   
@@ -2582,12 +2618,10 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
   console.log(userId)
 
   try {
-    const agora = Date.now();
-
-    // 🔥 CACHE 30s
-    if (cache[userId] && (agora - cacheTime[userId]) < 30000) {
+    const cached = getDashboardCache(String(userId));
+    if (cached) {
       console.log("⚡ usando cache");
-      return res.status(200).json(cache[userId]);
+      return res.status(200).json(cached);
     }
 
     console.log("🔄 buscando do banco");
@@ -2766,8 +2800,7 @@ app.get("/maquinas", verifyJWT, async (req: any, res) => {
     });
 
     // 🔥 SALVA CACHE
-    cache[userId] = maquinasComStatus;
-    cacheTime[userId] = agora;
+    setDashboardCache(String(userId), maquinasComStatus);
 
     return res.status(200).json(maquinasComStatus);
 
@@ -4394,6 +4427,23 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
           data: {
             metodoPagamento: "ESPECIE",
             ultimoPagamentoRecebido: new Date(),
+          },
+        });
+      }
+
+      if (Number.isFinite(value) && value > 0) {
+        await prisma.pix_Pagamento.create({
+          data: {
+            maquinaId: maquina.id,
+            valor: value.toString(),
+            mercadoPagoId: "CASH",
+            motivoEstorno: "",
+            tipo: "CASH",
+            taxas: "0",
+            clienteId: maquina.clienteId,
+            estornado: false,
+            operadora: "ESPECIE",
+            status: "CONFIRMADO",
           },
         });
       }
