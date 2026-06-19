@@ -3850,23 +3850,31 @@ app.post("/rota-recebimento-especie/:id", async (req, res) => {
                     },
                 });
             }
-            if (Number.isFinite(value) && value > 0) {
-                await prisma.pix_Pagamento.create({
-                    data: {
-                        maquinaId: maquina.id,
-                        valor: value.toString(),
-                        mercadoPagoId: "CASH",
-                        motivoEstorno: "",
-                        tipo: "CASH",
-                        taxas: "0",
-                        clienteId: maquina.clienteId,
-                        estornado: false,
-                        operadora: "ESPECIE",
-                        status: "CONFIRMADO",
-                    },
-                });
+            const novoPagamento = await prisma.pix_Pagamento.create({
+                data: {
+                    maquinaId: maquina.id,
+                    valor: value.toString(),
+                    mercadoPagoId: "CASH",
+                    motivoEstorno: podeLiberarEspecie ? `Observação: 1 nota de ${valorNotaTexto}` : "",
+                    tipo: "CASH",
+                    clienteId: maquina.clienteId,
+                    estornado: false,
+                    valorBonus: podeLiberarEspecie && bonusExtra > 0 ? bonusExtra : 0,
+                },
+            });
+            console.log(`
+💰 PAGAMENTO REGISTRADO (ESPÉCIE)
+👤 Cliente: ${maquina?.cliente?.nome || ""} (${maquina.clienteId})
+🏪 Máquina: ${maquina.nome} (${maquina.id})
+💵 Valor: ${valorNotaTexto}
+🎁 Bônus em espécie: ${podeLiberarEspecie ? "SIM" : "NÃO"}
+🎯 Bônus extra: ${bonusExtra}
+📝 ${novoPagamento.motivoEstorno || ""}
+`);
+            if (NOTIFICACOES_PAGAMENTOS_ESPECIE) {
+                notificarDiscord(DISCORD_WEBHOOKS.PAGAMENTOS_ESPECIE, `Novo pagamento recebido. R$: ${novoPagamento.valor.toString()}`, `Maquina: ${maquina?.nome}. Descrição: ${maquina?.descricao}`);
             }
-            return res.status(200).json({ retorno: "OK" });
+            return res.status(200).json({ "pagamento registrado": "Pagamento registrado" });
         }
         else {
             console.log("error.. máquina não encontrada!");
