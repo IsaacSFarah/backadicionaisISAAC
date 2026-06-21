@@ -14,6 +14,9 @@ const nodemailer_1 = __importDefault(require("nodemailer"));
 const moment_1 = __importDefault(require("moment"));
 const xml2js_1 = __importDefault(require("xml2js"));
 const dotenv_1 = __importDefault(require("dotenv"));
+const http_1 = require("http");
+const crypto_1 = require("crypto");
+const ws_1 = require("ws");
 // Configuração de variáveis de ambiente
 dotenv_1.default.config();
 // Constantes de configuração
@@ -88,12 +91,18 @@ let valordoPixMaquinaBatomEfi01 = null;
 let valordoPixPlaquinhaPixMP = null;
 // Inicialização do Express
 const app = (0, express_1.default)();
+const httpServer = (0, http_1.createServer)(app);
 const processandoWebhooks = new Set();
 const espInFlight = new Set();
 const espUltimoHeartbeat = new Map();
 const monitoramentoCache = new Map();
 const dashboardCache = new Map();
+const espSockets = new Map();
+const espSocketToMachineId = new Map();
+const espWsPendentes = new Map();
+const espWsPendenciaPorMaquina = new Map();
 const ESP_HEARTBEAT_WRITE_MS = 30000;
+const ESP_WS_ACK_TIMEOUT_MS = 5000;
 const DASHBOARD_CACHE_TTL_MS = 30000;
 const DASHBOARD_CACHE_MAX_ITEMS = 500;
 let processandoPagamentosPendentes = false;
@@ -127,6 +136,215 @@ function setDashboardCache(userId, data) {
     for (let i = 0; i < excesso; i++) {
         dashboardCache.delete(ordered[i][0]);
     }
+}
+function parseWsNumber(value) {
+    const parsed = parseInt(String(value ?? ""), 10);
+    return Number.isFinite(parsed) ? parsed : null;
+}
+function removerPendenciaWs(requestId) {
+    if (!requestId)
+        return;
+    const pendencia = espWsPendentes.get(requestId);
+    if (pendencia) {
+        espWsPendenciaPorMaquina.delete(pendencia.machineId);
+    }
+    espWsPendentes.delete(requestId);
+}
+function limparSocketEsp(machineId, socket) {
+    const atual = espSockets.get(machineId);
+    if (atual && (!socket || atual.socket === socket)) {
+        espSockets.delete(machineId);
+    }
+    if (socket) {
+        espSocketToMachineId.delete(socket);
+    }
+}
+async function registrarHeartbeatEsp(machineId, nivelDeSinal) {
+    const agora = Date.now();
+    const ultima = espUltimoHeartbeat.get(machineId) || 0;
+    if (agora - ultima < ESP_HEARTBEAT_WRITE_MS)
+        return;
+    espUltimoHeartbeat.set(machineId, agora);
+    const dataAtualizacao = {
+        ultimaRequisicao: new Date(),
+    };
+    if (nivelDeSinal !== null && nivelDeSinal !== undefined && !Number.isNaN(nivelDeSinal)) {
+        dataAtualizacao.nivelDeSinal = nivelDeSinal;
+    }
+    await prisma.pix_Maquina.update({
+        where: { id: machineId },
+        data: dataAtualizacao,
+    }).catch((err) => {
+        console.error("Erro ao registrar heartbeat WS da ESP:", err);
+    });
+}
+function calcularPulsosParaMaquinaWs(maquina) {
+    const valorPixAtualStr = String(maquina?.valorDoPix || "0");
+    const valorPixAtual = parseFloat(valorPixAtualStr);
+    const valorPorPulso = parseFloat(maquina?.valorDoPulso || "1");
+    const semCredito = !valorPixAtual ||
+        Number.isNaN(valorPixAtual) ||
+        valorPixAtual <= 0 ||
+        !valorPorPulso ||
+        Number.isNaN(valorPorPulso) ||
+        valorPorPulso <= 0;
+    if (semCredito) {
+        return {
+            valorPixAtualStr,
+            metodoPagamento: String(maquina?.metodoPagamento || "PIX").toUpperCase(),
+            pulsosFormatados: "0000",
+            bonus: 0,
+        };
+    }
+    const metodoPagamento = String(maquina?.metodoPagamento || "PIX").toUpperCase();
+    const metodosPermitidos = Array.isArray(maquina?.bonusMetodos)
+        ? maquina.bonusMetodos.map((m) => String(m).toUpperCase())
+        : [];
+    const bonusAtivo = maquina?.bonusAtivo === true;
+    const pulsosBase = Math.floor(valorPixAtual / valorPorPulso);
+    const pulsosBaseFormatado = String(pulsosBase).padStart(4, "0");
+    const podeAplicarBonus = bonusAtivo &&
+        metodoPagamento !== "ESPECIE" &&
+        metodoPagamento !== "REMOTO" &&
+        metodosPermitidos.includes(metodoPagamento);
+    let resultadoCalculo = { pulsos: pulsosBaseFormatado, bonus: 0 };
+    if (podeAplicarBonus) {
+        resultadoCalculo = calcularPulsosDinamicos(valorPixAtual, valorPorPulso, maquina, metodoPagamento);
+    }
+    return {
+        valorPixAtualStr,
+        metodoPagamento,
+        pulsosFormatados: resultadoCalculo.pulsos,
+        bonus: resultadoCalculo.bonus,
+    };
+}
+async function tentarEnviarCreditoViaWs(machineId, options) {
+    const conexao = espSockets.get(machineId);
+    if (!conexao || conexao.socket.readyState !== ws_1.WebSocket.OPEN || !conexao.supportsPush) {
+        return { enviado: false, motivo: "ESP_OFFLINE_OU_SEM_PUSH" };
+    }
+    const requestIdExistente = espWsPendenciaPorMaquina.get(machineId);
+    if (requestIdExistente) {
+        const pendenciaExistente = espWsPendentes.get(requestIdExistente);
+        if (pendenciaExistente && pendenciaExistente.expiresAt > Date.now()) {
+            return { enviado: false, motivo: "AGUARDANDO_ACK" };
+        }
+        removerPendenciaWs(requestIdExistente);
+    }
+    const maquina = await prisma.pix_Maquina.findUnique({
+        where: { id: machineId },
+        select: {
+            id: true,
+            nome: true,
+            valorDoPix: true,
+            valorDoPulso: true,
+            metodoPagamento: true,
+            bonusAtivo: true,
+            bonusMetodos: true,
+            bonusRegras: true,
+        },
+    });
+    if (!maquina) {
+        return { enviado: false, motivo: "MAQUINA_NAO_ENCONTRADA" };
+    }
+    const calculo = calcularPulsosParaMaquinaWs(maquina);
+    if (calculo.pulsosFormatados === "0000") {
+        return { enviado: false, motivo: "SEM_CREDITO" };
+    }
+    const requestId = (0, crypto_1.randomUUID)();
+    const mensagem = {
+        type: "pulse",
+        machineId,
+        requestId,
+        pulses: calculo.pulsosFormatados,
+        valor: calculo.valorPixAtualStr,
+        metodoPagamento: calculo.metodoPagamento,
+        source: options?.source || "SERVER_PUSH",
+    };
+    try {
+        conexao.socket.send(JSON.stringify(mensagem));
+        const agora = Date.now();
+        espWsPendentes.set(requestId, {
+            requestId,
+            machineId,
+            pagamentoId: options?.pagamentoId,
+            valorDoPix: calculo.valorPixAtualStr,
+            pulsos: calculo.pulsosFormatados,
+            source: options?.source || "SERVER_PUSH",
+            createdAt: agora,
+            expiresAt: agora + ESP_WS_ACK_TIMEOUT_MS,
+        });
+        espWsPendenciaPorMaquina.set(machineId, requestId);
+        console.log(`
+📡 CRÉDITO ENVIADO VIA WS
+🏪 Máquina: ${maquina.nome} (${machineId})
+💳 Método: ${calculo.metodoPagamento}
+💵 Valor: ${calculo.valorPixAtualStr}
+🧮 Pulsos: ${calculo.pulsosFormatados}
+🧾 RequestId: ${requestId}
+🔗 Origem: ${options?.source || "SERVER_PUSH"}
+`);
+        return {
+            enviado: true,
+            requestId,
+            pulsos: calculo.pulsosFormatados,
+        };
+    }
+    catch (err) {
+        console.error("Erro ao enviar crédito via WS:", err);
+        limparSocketEsp(machineId, conexao.socket);
+        removerPendenciaWs(requestId);
+        try {
+            conexao.socket.terminate();
+        }
+        catch { }
+        return { enviado: false, motivo: "ERRO_ENVIO_WS" };
+    }
+}
+async function confirmarPendenciaWs(requestId, machineId, nivelDeSinal) {
+    const pendencia = espWsPendentes.get(requestId);
+    if (!pendencia)
+        return false;
+    if (pendencia.machineId !== machineId)
+        return false;
+    removerPendenciaWs(requestId);
+    await registrarHeartbeatEsp(machineId, nivelDeSinal);
+    await prisma.pix_Maquina.updateMany({
+        where: {
+            id: machineId,
+            valorDoPix: pendencia.valorDoPix,
+        },
+        data: {
+            valorDoPix: "0",
+            ultimaRequisicao: new Date(),
+            ...(nivelDeSinal !== null && nivelDeSinal !== undefined && !Number.isNaN(nivelDeSinal)
+                ? { nivelDeSinal }
+                : {}),
+        },
+    }).catch((err) => {
+        console.error("Erro ao limpar crédito após ACK WS:", err);
+    });
+    if (pendencia.pagamentoId) {
+        await prisma.pix_Pagamento.updateMany({
+            where: {
+                id: pendencia.pagamentoId,
+                estornado: false,
+            },
+            data: {
+                status: "CONFIRMADO",
+            },
+        }).catch((err) => {
+            console.error("Erro ao confirmar pagamento após ACK WS:", err);
+        });
+    }
+    console.log(`
+✅ ACK RECEBIDO VIA WS
+🏪 Máquina: ${machineId}
+🧾 RequestId: ${requestId}
+🧮 Pulsos: ${pendencia.pulsos}
+🔗 Origem: ${pendencia.source}
+`);
+    return true;
 }
 async function processarPagamentosPendentes() {
     if (processandoPagamentosPendentes)
@@ -216,6 +434,121 @@ setInterval(() => {
         }
     }
 }, 5 * 60 * 1000);
+setInterval(() => {
+    const agora = Date.now();
+    for (const [requestId, pendencia] of espWsPendentes) {
+        if (agora <= pendencia.expiresAt)
+            continue;
+        console.log(`
+⌛ ACK WS EXPIRADO
+🏪 Máquina: ${pendencia.machineId}
+🧾 RequestId: ${requestId}
+🔗 Origem: ${pendencia.source}
+`);
+        removerPendenciaWs(requestId);
+    }
+}, 1000);
+const wss = new ws_1.WebSocketServer({ server: httpServer, path: "/ws/esp" });
+wss.on("connection", (socket, req) => {
+    const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "");
+    socket.on("message", async (raw) => {
+        try {
+            const texto = typeof raw === "string" ? raw : raw.toString();
+            const msg = JSON.parse(texto);
+            const tipo = String(msg?.type || "").toLowerCase();
+            const machineId = String(msg?.machineId || "").trim();
+            const nivelDeSinal = parseWsNumber(msg?.rssi);
+            if (!machineId) {
+                socket.send(JSON.stringify({ type: "error", message: "machineId obrigatório" }));
+                return;
+            }
+            if (tipo === "hello") {
+                const conexaoAnterior = espSockets.get(machineId);
+                if (conexaoAnterior && conexaoAnterior.socket !== socket) {
+                    try {
+                        conexaoAnterior.socket.close();
+                    }
+                    catch { }
+                    limparSocketEsp(machineId, conexaoAnterior.socket);
+                }
+                espSockets.set(machineId, {
+                    socket,
+                    machineId,
+                    lastSeenAt: Date.now(),
+                    lastHelloAt: Date.now(),
+                    supportsPush: msg?.supportsPush !== false,
+                    ip,
+                    firmware: msg?.firmware ? String(msg.firmware) : undefined,
+                });
+                espSocketToMachineId.set(socket, machineId);
+                await registrarHeartbeatEsp(machineId, nivelDeSinal);
+                socket.send(JSON.stringify({
+                    type: "hello_ack",
+                    ok: true,
+                    machineId,
+                    ackTimeoutMs: ESP_WS_ACK_TIMEOUT_MS,
+                }));
+                console.log(`
+🔌 ESP ONLINE VIA WS
+🏪 Máquina: ${machineId}
+🌐 IP: ${ip}
+📶 Sinal: ${nivelDeSinal ?? ""}
+🧠 Firmware: ${msg?.firmware || ""}
+`);
+                void tentarEnviarCreditoViaWs(machineId, { source: "WS_HELLO_SYNC" });
+                return;
+            }
+            const conexao = espSockets.get(machineId);
+            if (!conexao || conexao.socket !== socket) {
+                socket.send(JSON.stringify({ type: "error", message: "hello obrigatório antes de outras mensagens" }));
+                return;
+            }
+            conexao.lastSeenAt = Date.now();
+            if (tipo === "heartbeat") {
+                await registrarHeartbeatEsp(machineId, nivelDeSinal);
+                socket.send(JSON.stringify({ type: "heartbeat_ack", machineId, serverTime: Date.now() }));
+                return;
+            }
+            if (tipo === "pulse_ack") {
+                const requestId = String(msg?.requestId || "").trim();
+                if (!requestId) {
+                    socket.send(JSON.stringify({ type: "error", message: "requestId obrigatório no ack" }));
+                    return;
+                }
+                const confirmado = await confirmarPendenciaWs(requestId, machineId, nivelDeSinal);
+                socket.send(JSON.stringify({
+                    type: "pulse_ack_result",
+                    machineId,
+                    requestId,
+                    ok: confirmado,
+                }));
+                return;
+            }
+            socket.send(JSON.stringify({ type: "error", message: `tipo não suportado: ${tipo}` }));
+        }
+        catch (err) {
+            console.error("Erro ao processar mensagem WS da ESP:", err);
+            try {
+                socket.send(JSON.stringify({ type: "error", message: "mensagem inválida" }));
+            }
+            catch { }
+        }
+    });
+    socket.on("close", () => {
+        const machineId = espSocketToMachineId.get(socket);
+        if (!machineId)
+            return;
+        limparSocketEsp(machineId, socket);
+        console.log(`🔌 ESP OFFLINE VIA WS: ${machineId}`);
+    });
+    socket.on("error", (err) => {
+        const machineId = espSocketToMachineId.get(socket);
+        if (machineId) {
+            limparSocketEsp(machineId, socket);
+        }
+        console.error("Erro no socket WS da ESP:", err);
+    });
+});
 async function limparLinksExpirados() {
     const limite = new Date(Date.now() - LINK_EXPIRACAO_MS);
     try {
@@ -651,9 +984,10 @@ app.use((err, req, res, next) => {
     });
 });
 // Inicialização do servidor
-app.listen(PORT, () => {
+httpServer.listen(PORT, () => {
     console.log(`Servidor rodando na porta ${PORT}`);
     console.log(`Ambiente: ${process.env.NODE_ENV || 'development'}`);
+    console.log(`WebSocket ESP ativo em /ws/esp`);
 });
 app.get("/monitoramento-html", async (req, res) => {
     // Construir a tabela em HTML com CSS embutido
@@ -1790,6 +2124,15 @@ app.get("/consultar-maquina/:id", async (req, res) => {
                 });
                 return res.status(200).json({ retorno: "0000" });
             }
+            const requestIdWsPendente = espWsPendenciaPorMaquina.get(maquinaId);
+            if (requestIdWsPendente) {
+                const pendenciaWs = espWsPendentes.get(requestIdWsPendente);
+                if (pendenciaWs && pendenciaWs.expiresAt > Date.now()) {
+                    void registrarHeartbeatEsp(maquinaId, sinalInt);
+                    return res.status(200).json({ retorno: "0000" });
+                }
+                removerPendenciaWs(requestIdWsPendente);
+            }
             // 🔢 CONVERTE PIX EM PULSOS COM LÓGICA DE BÔNUS DINÂMICO DA MÁQUINA
             const valorPixAtualStr = String(maquina.valorDoPix || "0");
             const valorPixAtual = parseFloat(valorPixAtualStr);
@@ -1973,6 +2316,7 @@ app.post("/credito-remoto", verifyJwtPessoa, async (req, res) => {
             if (NOTIFICACOES_CREDITO_REMOTO) {
                 notificarDiscord(DISCORD_WEBHOOKS.CREDITO_REMOTO, `CRÉDITO REMOTO DE R$: ${req.body.valor} em ${maquina.nome} de ${maquina.cliente?.nome}`, `Enviado pelo adm: ${req.userId} `);
             }
+            void tentarEnviarCreditoViaWs(maquina.id, { source: "CREDITO_REMOTO_ADM" });
             return res.status(200).json({ "retorno": "CREDITO INSERIDO" });
         }
         else {
@@ -2041,6 +2385,7 @@ app.post("/credito-remoto-cliente", verifyJWT, async (req, res) => {
             if (NOTIFICACOES_CREDITO_REMOTO) {
                 notificarDiscord(DISCORD_WEBHOOKS.CREDITO_REMOTO, `CRÉDITO REMOTO DE R$: ${req.body.valor} em ${maquina.nome} de ${maquina.cliente?.nome}`, `Enviado pelo cliente: ${req.userId} `);
             }
+            void tentarEnviarCreditoViaWs(maquina.id, { source: "CREDITO_REMOTO_CLIENTE" });
             return res.status(200).json({ "retorno": "CREDITO INSERIDO" });
         }
         else {
@@ -3342,7 +3687,7 @@ app.post("/rota-recebimento-mercado-pago-dinamica/:id", async (req, res) => {
                 ultimoPagamentoRecebido: new Date()
             }
         });
-        await prisma.pix_Pagamento.create({
+        const novoPagamento = await prisma.pix_Pagamento.create({
             data: {
                 maquinaId: maquina.id,
                 valor: valor.toString(),
@@ -3353,6 +3698,10 @@ app.post("/rota-recebimento-mercado-pago-dinamica/:id", async (req, res) => {
                 estornado: false,
                 status: "PENDENTE"
             }
+        });
+        void tentarEnviarCreditoViaWs(maquina.id, {
+            pagamentoId: novoPagamento.id,
+            source: "WEBHOOK_MP_PRINCIPAL",
         });
         pagamentoProcessado = true;
         console.log(`
@@ -3873,6 +4222,9 @@ app.post("/rota-recebimento-especie/:id", async (req, res) => {
 `);
             if (NOTIFICACOES_PAGAMENTOS_ESPECIE) {
                 notificarDiscord(DISCORD_WEBHOOKS.PAGAMENTOS_ESPECIE, `Novo pagamento recebido. R$: ${novoPagamento.valor.toString()}`, `Maquina: ${maquina?.nome}. Descrição: ${maquina?.descricao}`);
+            }
+            if (podeLiberarEspecie && bonusExtra > 0) {
+                void tentarEnviarCreditoViaWs(maquina.id, { source: "ESPECIE_BONUS" });
             }
             return res.status(200).json({ "pagamento registrado": "Pagamento registrado" });
         }
@@ -7088,6 +7440,7 @@ app.post("/usar-link/:id", async (req, res) => {
             where: { id },
             data: { usado: true }
         });
+        void tentarEnviarCreditoViaWs(maquina.id, { source: "LINK" });
         console.log(`🔗 CRÉDITO POR LINK OK`);
         return res.json({ sucesso: true });
     }
