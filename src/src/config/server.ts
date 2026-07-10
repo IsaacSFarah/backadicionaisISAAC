@@ -5108,7 +5108,7 @@ app.get("/pagamentos/:maquinaId", verifyJWT, async (req: any, res) => {
       } else if (pagamento.tipo === "debit_card") {
         valorCartaoDebito += parseFloat(pagamento.valor)
         taxaCartaoDebito += parseFloat(pagamento.taxas!)
-      } else if (pagamento.tipo === "credit_card") {
+      } else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card") {
         valorCartaoCredito += parseFloat(pagamento.valor)
         taxaCartaoCredito += parseFloat(pagamento.taxas!)
       }
@@ -5342,7 +5342,7 @@ app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req: any, res) => {
       } else if (pagamento.tipo === "debit_card") {
         valorCartaoDebito += parseFloat(pagamento.valor)
         taxaCartaoDebito += parseFloat(pagamento.taxas!)
-      } else if (pagamento.tipo === "credit_card") {
+      } else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card") {
         valorCartaoCredito += parseFloat(pagamento.valor)
         taxaCartaoCredito += parseFloat(pagamento.taxas!)
       }
@@ -5713,7 +5713,10 @@ app.post("/relatorio-02-taxas", verifyJWT, async (req, res) => {
       const pagamentos = await prisma.pix_Pagamento.findMany({
         where: {
           maquinaId: req.body.maquinaId,
-          tipo: "credit_card",
+          OR: [
+            { tipo: "credit_card" },
+            { tipo: "prepaid_card" }
+          ],
           estornado: false,
           data: {
             gte: new Date(req.body.dataInicio),
@@ -5795,7 +5798,10 @@ app.post("/relatorio-02-taxas-adm", verifyJwtPessoa, async (req, res) => {
       const pagamentos = await prisma.pix_Pagamento.findMany({
         where: {
           maquinaId: req.body.maquinaId,
-          tipo: "credit_card",
+          OR: [
+            { tipo: "credit_card" },
+            { tipo: "prepaid_card" }
+          ],
           estornado: false
         }
       });
@@ -5868,7 +5874,10 @@ app.post("/relatorio-03-pagamentos", verifyJWT, async (req, res) => {
     const pagamentos_credito = await prisma.pix_Pagamento.findMany({
       where: {
         maquinaId: req.body.maquinaId,
-        tipo: "credit_card",
+        OR: [
+          { tipo: "credit_card" },
+          { tipo: "prepaid_card" }
+        ],
         estornado: false,
         data: {
           gte: new Date(req.body.dataInicio),
@@ -5979,7 +5988,10 @@ app.post("/relatorio-03-pagamentos-adm", verifyJwtPessoa, async (req, res) => {
     const pagamentos_credito = await prisma.pix_Pagamento.findMany({
       where: {
         maquinaId: req.body.maquinaId,
-        tipo: "credit_card",
+        OR: [
+          { tipo: "credit_card" },
+          { tipo: "prepaid_card" }
+        ],
         estornado: false,
         data: {
           gte: new Date(req.body.dataInicio),
@@ -7835,7 +7847,7 @@ app.get("/payments-client", verifyJWT, async (req: any, res) => {
         valorPix += parseFloat(pagamento.valor)
       } else if (pagamento.tipo === "debit_card") {
         valorCartaoDebito += parseFloat(pagamento.valor)
-      } else if (pagamento.tipo === "credit_card") {
+      } else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card") {
         valorCartaoCredito += parseFloat(pagamento.valor)
       }
       qtd += 1;
