@@ -1054,8 +1054,13 @@ async function estornarMP(id: string, token: string, motivoEstorno: string, tama
 
     return response.data;
   } catch (error) {
-    console.error(`Erro ao efetuar o estorno da operação: ${id}`);
-    console.error('Detalhes do erro:', error);
+    const erroAxios = error as any;
+    const status = erroAxios?.response?.status;
+    const motivoErro =
+      erroAxios?.response?.data?.message ||
+      erroAxios?.response?.data?.cause?.[0]?.description ||
+      erroAxios?.message ||
+      "erro desconhecido";
 
     numTentativasEstorno++;
 
@@ -1063,7 +1068,9 @@ async function estornarMP(id: string, token: string, motivoEstorno: string, tama
       // Tentar novamente recursivamente
       return await estornarMP(id, token, motivoEstorno, tamanhoChave);
     } else {
-      console.error(`Após ${MAX_TENTATIVAS} tentativas não foi possível efetuar o estorno. VERIFIQUE O TOKEN DO CLIENTE!!`);
+      console.error(
+        `Estorno não concluído | pagamento: ${id} | motivo: ${motivoEstorno} | status: ${status ?? "sem status"} | erro: ${motivoErro}`
+      );
       numTentativasEstorno = 1;
       return undefined;
     }
