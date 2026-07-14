@@ -4178,18 +4178,24 @@ app.post("/rota-recebimento-mercado-pago-dinamica/:id", async (req: any, res: an
         }
       });
       if (!jaEstornado) {
-        await estornarMP(paymentId, tokenCliente, "maquina offline");
-      }
-      await prisma.pix_Pagamento.create({
-        data: {
-          maquinaId: maquina.id,
-          valor: valor.toString(),
-          mercadoPagoId: paymentId,
-          motivoEstorno: "maquina offline",
-          estornado: true,
-          clienteId: cliente.id
+        const estorno = await estornarMP(paymentId, tokenCliente, "maquina offline");
+        if (!estorno) {
+          console.log("❌ Estorno de máquina offline falhou, pagamento não será marcado como estornado");
+          processandoWebhooks.delete(paymentId);
+          return res.status(200).end();
         }
-      });
+
+        await prisma.pix_Pagamento.create({
+          data: {
+            maquinaId: maquina.id,
+            valor: valor.toString(),
+            mercadoPagoId: paymentId,
+            motivoEstorno: "maquina offline",
+            estornado: true,
+            clienteId: cliente.id
+          }
+        });
+      }
       processandoWebhooks.delete(paymentId);
       return res.status(200).end();
     }
@@ -4356,6 +4362,7 @@ app.post("/rota-recebimento-mercado-pago-dinamica/:id", async (req: any, res: an
     return res.status(200).end();
   }
 });
+
 
 //esse :id é o do seu cliente e não da máquina!
 //EXEMPLO:
