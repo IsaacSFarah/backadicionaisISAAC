@@ -2678,7 +2678,16 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
       }
 
     } else {
-    }
+
+  console.log(`
+❌ MÁQUINA NÃO ENCONTRADA
+🆔 ID pesquisado: "${maquinaId}"
+🌐 URL: ${req.originalUrl}
+📶 Sinal: ${req.query.nivelDeSinal ?? ""}
+🌍 IP: ${ip}
+`);
+
+}
 
     return res.status(200).json({ retorno: pulsosFormatados });
 
