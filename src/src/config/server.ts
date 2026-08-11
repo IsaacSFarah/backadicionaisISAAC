@@ -5350,13 +5350,13 @@ app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req: any, res) => {
       if (pagamento.tipo === "CASH" || pagamento.mercadoPagoId === "CASH") {
         totalEspecie += parseFloat(pagamento.valor)
         valorCash += parseFloat(pagamento.valor)
-      } else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money") {
+      } else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money" || pagamento.tipo === "digital_currency" || pagamento.tipo === "11") {
         valorPix += parseFloat(pagamento.valor)
         taxaPix += parseFloat(pagamento.taxas!)
-      } else if (pagamento.tipo === "debit_card") {
+      } else if (pagamento.tipo === "debit_card" || pagamento.tipo === "8") {
         valorCartaoDebito += parseFloat(pagamento.valor)
         taxaCartaoDebito += parseFloat(pagamento.taxas!)
-      } else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card") {
+      } else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card" || pagamento.tipo === "1") {
         valorCartaoCredito += parseFloat(pagamento.valor)
         taxaCartaoCredito += parseFloat(pagamento.taxas!)
       }
@@ -5364,7 +5364,7 @@ app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req: any, res) => {
       qtd += 1;
 
       const valor = parseFloat(pagamento.valor);
-
+      
       if (pagamento.estornado === false) {
         totalSemEstorno += valor;
       } else {
@@ -5373,20 +5373,6 @@ app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req: any, res) => {
       totalBruto = totalComEstorno + totalSemEstorno
       totalLiquido = totalSemEstorno - (taxaCartaoCredito + taxaCartaoDebito + taxaPix)
     }
-
-    // const especie = await prisma.pix_Pagamento.findMany({
-    //   where: {
-    //     maquinaId: req.params.maquinaId,
-    //     removido: false,
-    //     mercadoPagoId: `CASH`
-    //   }
-    // });
-
-    // for (const e of especie) {
-    //   const valor = parseFloat(e.valor);
-    //   totalEspecie += valor;
-
-    // }
 
     return res.status(200).json({
       "totalBruto": totalBruto,
@@ -7720,10 +7706,13 @@ app.get("/payments-client", verifyJWT, async (req: any, res) => {
     let totalBruto = 0
     let totalLiquido = 0
 
+    let taxaPix = 0
+    let taxaCartaoCredito = 0
+    let taxaCartaoDebito = 0
+
     // Filtros dinâmicos
     const where: any = {
       maquinaId: maquinaId,
-      estornado: false,
     };
 
     const agora = new Date();
@@ -7783,7 +7772,7 @@ app.get("/payments-client", verifyJWT, async (req: any, res) => {
         inicioFiltro.setDate(inicioFiltro.getDate() - 7);
 
         fimFiltro = new Date(hoje);
-        fimFiltro.setDate(fimFiltro.getDate() + 1); // exclusivo
+        fimFiltro.setDate(fimFiltro.getDate());
 
         break;
       }
@@ -7794,7 +7783,7 @@ app.get("/payments-client", verifyJWT, async (req: any, res) => {
         inicioFiltro.setHours(0, 0, 0, 0);
 
         // Primeiro dia do próximo mês (exclusivo)
-        fimFiltro = new Date(agora.getFullYear(), agora.getMonth() + 1, 1);
+        fimFiltro = new Date(agora.getFullYear(), agora.getMonth(), 1);
         fimFiltro.setHours(0, 0, 0, 0);
 
         break;
@@ -7824,7 +7813,7 @@ app.get("/payments-client", verifyJWT, async (req: any, res) => {
 
         fimFiltro = new Date(dataFim);
         fimFiltro.setHours(0, 0, 0, 0);
-        fimFiltro.setDate(fimFiltro.getDate() + 1); // exclusivo
+        fimFiltro.setDate(fimFiltro.getDate());
 
         break;
       }
@@ -7855,24 +7844,31 @@ app.get("/payments-client", verifyJWT, async (req: any, res) => {
       if (pagamento?.tipo === "SAIDA_PRODUTO" || pagamento?.mercadoPagoId === "saiu premio") {
         continue;
       }
-      if (pagamento.tipo === "CASH") {
+      if (pagamento.tipo === "CASH" || pagamento.mercadoPagoId === "CASH") {
         valorCash += parseFloat(pagamento.valor)
-      } else if (pagamento.tipo === "bank_transfer") {
+      } else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money" || pagamento.tipo === "digital_currency" || pagamento.tipo === "11") {
         valorPix += parseFloat(pagamento.valor)
-      } else if (pagamento.tipo === "debit_card") {
+        taxaPix += parseFloat(pagamento.taxas!)
+      } else if (pagamento.tipo === "debit_card" || pagamento.tipo === "8") {
         valorCartaoDebito += parseFloat(pagamento.valor)
-      } else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card") {
+        taxaCartaoDebito += parseFloat(pagamento.taxas!)
+      } else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card" || pagamento.tipo === "1") {
         valorCartaoCredito += parseFloat(pagamento.valor)
+        taxaCartaoCredito += parseFloat(pagamento.taxas!)
       }
+
       qtd += 1;
       valorTotal += parseFloat(pagamento.valor);
-      if (pagamento.estornado === true) {
-        totalEstorno += parseFloat(pagamento.valor)
+
+      const valor = parseFloat(pagamento.valor);
+      
+      if (pagamento.estornado === false) {
+        totalSemEstorno += valor;
       } else {
-        totalSemEstorno += parseFloat(pagamento.valor)
+        totalEstorno += valor;
       }
       totalBruto = totalEstorno + totalSemEstorno
-      totalLiquido = totalSemEstorno
+      totalLiquido = totalSemEstorno - (taxaCartaoCredito + taxaCartaoDebito + taxaPix)
     }
 
     // Busca os 10 pagamentos mais recentes de acordo com os filtros aplicados e inclui nome e descrição da máquina
@@ -7906,7 +7902,7 @@ app.get("/payments-client", verifyJWT, async (req: any, res) => {
 
     // Retorna o somatório dos valores dos pagamentos e os 10 pagamentos mais recentes
     return res.status(200).json({
-      soma: valorTotal.toFixed(2), // Retorna o valor formatado com 2 casas decimais
+      soma: valorTotal.toFixed(2),
       totalBruto: totalBruto,
       totalLiquido: totalLiquido,
       totalEstorno: totalEstorno,
