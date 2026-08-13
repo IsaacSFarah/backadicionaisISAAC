@@ -4982,9 +4982,15 @@ app.post("/decrementar-estoque/:id/", async (req: any, res: any) => {
           data: { gt: referenciaData, lte: new Date() },
           OR: [
             { tipo: "bank_transfer" },
+            { tipo: "11" },
+            { tipo: "account_money" },
             { tipo: "credit_card" },
+            { tipo: "prepaid_card" },
+            { tipo: "1" },
             { tipo: "debit_card" },
-            { tipo: "CASH" }
+            { tipo: "8" },
+            { tipo: "CASH" },
+            { mercadoPagoId: "CASH" }
           ]
         }
       });
