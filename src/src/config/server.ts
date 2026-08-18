@@ -2707,7 +2707,7 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
 });
 
 
-//SIMULA UM CRÉDITO REMOTO
+//SIMULA UM CRÉDITO REMOTO ADM
 app.post("/credito-remoto", verifyJwtPessoa, async (req: any, res) => {
 
   try {
@@ -2721,71 +2721,168 @@ app.post("/credito-remoto", verifyJwtPessoa, async (req: any, res) => {
       },
     });
 
-    //VERIFICANDO SE A MÁQUINA PERTENCE A UM CIENTE ATIVO 
-    if (maquina != null) {
-      if (maquina.cliente !== null && maquina.cliente !== undefined) {
-        if (maquina.cliente.ativo && !isInadimplente(maquina.cliente.dataVencimento)) {
-          console.log("Cliente ativo - seguindo...");
-        } else {
-          console.log("Cliente inativo - parando...");
-          return res.status(500).json({ "retorno": `CLIENTE ${maquina.cliente.nome} INATIVO` });
-        }
-      } else {
-        console.log("error.. cliente nulo!");
-      }
+    // ==============================
+    // VERIFICA SE A MÁQUINA EXISTE
+    // ==============================
+    if (!maquina) {
+      console.log("Máquina não encontrada");
 
-      //VERIFICAR SE A MAQUINA ESTA ONINE
-      if (maquina.ultimaRequisicao) {
-        var status = (tempoOffline(maquina.ultimaRequisicao)) > 60 ? "OFFLINE" : "ONLINE";
-        console.log(status);
-        if (status == "OFFLINE") {
-          return res.status(400).json({ "msg": "MÁQUINA OFFLINE!" });
-        }
-      } else {
-        return res.status(400).json({ "msg": "MÁQUINA OFFLINE!" });
-      }
-
-      await prisma.pix_Maquina.update({
-        where: {
-          id: req.body.id
-        },
-        data: {
-          valorDoPix: String(req.body.valor), // 🔥 FIX
-          metodoPagamento: "REMOTO",         // 🔥 ESSENCIAL
-          ultimoPagamentoRecebido: new Date()
-        }
+      return res.status(301).json({
+        retorno: "ID NÃO ENCONTRADO"
       });
-
-      //registrando quem fez o crédito remoto
-      var adm = await prisma.pix_Pessoa.findUnique({
-        where: {
-          id: req.userId,
-        },
-      });
-
-      const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-      registrarCreditoRemoto(adm?.email || "", ip, maquina.id, req.body.valor);
-
-      if (NOTIFICACOES_CREDITO_REMOTO) {
-        notificarDiscord(DISCORD_WEBHOOKS.CREDITO_REMOTO, `CRÉDITO REMOTO DE R$: ${req.body.valor} em ${maquina.nome} de ${maquina.cliente?.nome}`, `Enviado pelo adm: ${req.userId} `)
-      }
-
-      void tentarEnviarCreditoViaWs(maquina.id, { source: "CREDITO_REMOTO_ADM" });
-
-      return res.status(200).json({ "retorno": "CREDITO INSERIDO" });
-
-    } else {
-      console.log("não encontrou");
-      return res.status(301).json({ "retorno": "ID NÃO ENCONTRADO" });
     }
 
+    // ==============================
+    // VERIFICA CLIENTE
+    // ==============================
+    if (maquina.cliente !== null && maquina.cliente !== undefined) {
+
+      if (
+        maquina.cliente.ativo &&
+        !isInadimplente(maquina.cliente.dataVencimento)
+      ) {
+
+        console.log("Cliente ativo - seguindo...");
+
+      } else {
+
+        console.log("Cliente inativo - parando...");
+
+        return res.status(500).json({
+          retorno: `CLIENTE ${maquina.cliente.nome} INATIVO`
+        });
+      }
+
+    } else {
+
+      console.log("error.. cliente nulo!");
+    }
+
+    // ==============================
+    // VERIFICA SE A MÁQUINA ESTÁ ONLINE
+    // ==============================
+    if (maquina.ultimaRequisicao) {
+
+      const status =
+        tempoOffline(maquina.ultimaRequisicao) > 60
+          ? "OFFLINE"
+          : "ONLINE";
+
+      console.log(`Máquina ${maquina.nome}: ${status}`);
+
+      if (status === "OFFLINE") {
+
+        return res.status(400).json({
+          msg: "MÁQUINA OFFLINE!"
+        });
+      }
+
+    } else {
+
+      return res.status(400).json({
+        msg: "MÁQUINA OFFLINE!"
+      });
+    }
+
+    // ==============================
+    // VALOR DO CRÉDITO
+    // ==============================
+    const valorCredito = String(req.body.valor);
+
+    if (
+      !valorCredito ||
+      Number.isNaN(parseFloat(valorCredito)) ||
+      parseFloat(valorCredito) <= 0
+    ) {
+
+      return res.status(400).json({
+        retorno: "VALOR DE CRÉDITO INVÁLIDO"
+      });
+    }
+
+    // ==============================
+    // GRAVA O CRÉDITO NA MÁQUINA
+    // ==============================
+    await prisma.pix_Maquina.update({
+      where: {
+        id: maquina.id
+      },
+      data: {
+        valorDoPix: valorCredito,
+        metodoPagamento: "REMOTO",
+        ultimoPagamentoRecebido: new Date()
+      }
+    });
+
+    console.log(`
+========================================
+💰 CRÉDITO REMOTO ADMINISTRADOR
+========================================
+🏪 Máquina: ${maquina.nome}
+🆔 ID: ${maquina.id}
+💵 Valor: ${valorCredito}
+💳 Método: REMOTO
+========================================
+`);
+
+    // ==============================
+    // REGISTRA QUEM FEZ O CRÉDITO
+    // ==============================
+    const adm = await prisma.pix_Pessoa.findUnique({
+      where: {
+        id: req.userId,
+      },
+    });
+
+    const ip =
+      req.headers["x-forwarded-for"] ||
+      req.socket.remoteAddress;
+
+    registrarCreditoRemoto(
+      adm?.email || "",
+      ip,
+      maquina.id,
+      req.body.valor
+    );
+
+    // ==============================
+    // NOTIFICAÇÃO
+    // ==============================
+    if (NOTIFICACOES_CREDITO_REMOTO) {
+
+      notificarDiscord(
+        DISCORD_WEBHOOKS.CREDITO_REMOTO,
+        `CRÉDITO REMOTO DE R$: ${valorCredito} em ${maquina.nome} de ${maquina.cliente?.nome}`,
+        `Enviado pelo adm: ${req.userId}`
+      );
+    }
+
+    // ==============================
+    // TENTA ENVIAR PELO WEBSOCKET
+    // ==============================
+    void tentarEnviarCreditoViaWs(maquina.id, {
+      source: "CREDITO_REMOTO_ADM"
+    });
+
+    // ==============================
+    // RESPOSTA
+    // ==============================
+    return res.status(200).json({
+      retorno: "CREDITO INSERIDO"
+    });
+
   } catch (err: any) {
-    console.log(err);
-    return res.status(500).json({ "retorno": "ERRO: see: console > view logs" });
+
+    console.log("Erro no crédito remoto:", err);
+
+    return res.status(500).json({
+      retorno: "ERRO: see: console > view logs"
+    });
   }
 });
 
-//SIMULA UM CRÉDITO REMOTO
+
+//SIMULA UM CRÉDITO REMOTO CLIENTE
 app.post("/credito-remoto-cliente", verifyJWT, async (req: any, res) => {
 
   try {
@@ -2799,70 +2896,167 @@ app.post("/credito-remoto-cliente", verifyJWT, async (req: any, res) => {
       },
     });
 
+    // ==============================
+    // VERIFICA SE A MÁQUINA EXISTE
+    // ==============================
+    if (!maquina) {
 
-    //VERIFICANDO SE A MÁQUINA PERTENCE A UM CIENTE ATIVO 
-    if (maquina != null) {
-      if (maquina.cliente !== null && maquina.cliente !== undefined) {
-        if (maquina.cliente.ativo && !isInadimplente(maquina.cliente.dataVencimento)) {
-          console.log("Cliente ativo - seguindo...");
-        } else {
-          console.log("Cliente inativo - parando...");
-          return res.status(500).json({ "retorno": `CLIENTE ${maquina.cliente.nome} INATIVO` });
-        }
-      } else {
-        console.log("error.. cliente nulo!");
-      }
+      console.log("Máquina não encontrada");
 
-      //VERIFICAR SE A MAQUINA ESTA ONINE
-      if (maquina.ultimaRequisicao) {
-        var status = tempoOffline(maquina.ultimaRequisicao) > 60 ? "OFFLINE" : "ONLINE";
-        console.log(status);
-        if (status == "OFFLINE") {
-          return res.status(400).json({ "msg": "MÁQUINA OFFLINE!" });
-        }
-      } else {
-        return res.status(400).json({ "msg": "MÁQUINA OFFLINE!" });
-      }
-
-
-      await prisma.pix_Maquina.update({
-        where: {
-          id: req.body.id
-        },
-        data: {
-          valorDoPix: req.body.valor,
-          ultimoPagamentoRecebido: new Date(Date.now())
-        }
+      return res.status(301).json({
+        retorno: "ID NÃO ENCONTRADO"
       });
-
-      //registrando quem fez o crédito remoto
-      var cliente = await prisma.pix_Cliente.findUnique({
-        where: {
-          id: req.userId,
-        },
-      });
-
-      const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-      registrarCreditoRemoto(cliente?.email || "", ip, maquina.id, req.body.valor);
-
-      if (NOTIFICACOES_CREDITO_REMOTO) {
-        notificarDiscord(DISCORD_WEBHOOKS.CREDITO_REMOTO, `CRÉDITO REMOTO DE R$: ${req.body.valor} em ${maquina.nome} de ${maquina.cliente?.nome}`, `Enviado pelo cliente: ${req.userId} `)
-      }
-
-      void tentarEnviarCreditoViaWs(maquina.id, { source: "CREDITO_REMOTO_CLIENTE" });
-
-      return res.status(200).json({ "retorno": "CREDITO INSERIDO" });
-
-    } else {
-      console.log("não encontrou");
-      return res.status(301).json({ "retorno": "ID NÃO ENCONTRADO" });
     }
 
+    // ==============================
+    // VERIFICA CLIENTE
+    // ==============================
+    if (maquina.cliente !== null && maquina.cliente !== undefined) {
+
+      if (
+        maquina.cliente.ativo &&
+        !isInadimplente(maquina.cliente.dataVencimento)
+      ) {
+
+        console.log("Cliente ativo - seguindo...");
+
+      } else {
+
+        console.log("Cliente inativo - parando...");
+
+        return res.status(500).json({
+          retorno: `CLIENTE ${maquina.cliente.nome} INATIVO`
+        });
+      }
+
+    } else {
+
+      console.log("error.. cliente nulo!");
+    }
+
+    // ==============================
+    // VERIFICA SE A MÁQUINA ESTÁ ONLINE
+    // ==============================
+    if (maquina.ultimaRequisicao) {
+
+      const status =
+        tempoOffline(maquina.ultimaRequisicao) > 60
+          ? "OFFLINE"
+          : "ONLINE";
+
+      console.log(`Máquina ${maquina.nome}: ${status}`);
+
+      if (status === "OFFLINE") {
+
+        return res.status(400).json({
+          msg: "MÁQUINA OFFLINE!"
+        });
+      }
+
+    } else {
+
+      return res.status(400).json({
+        msg: "MÁQUINA OFFLINE!"
+      });
+    }
+
+    // ==============================
+    // VALOR DO CRÉDITO
+    // ==============================
+    const valorCredito = String(req.body.valor);
+
+    if (
+      !valorCredito ||
+      Number.isNaN(parseFloat(valorCredito)) ||
+      parseFloat(valorCredito) <= 0
+    ) {
+
+      return res.status(400).json({
+        retorno: "VALOR DE CRÉDITO INVÁLIDO"
+      });
+    }
+
+    // ==============================
+    // GRAVA O CRÉDITO NA MÁQUINA
+    // ==============================
+    await prisma.pix_Maquina.update({
+      where: {
+        id: maquina.id
+      },
+      data: {
+        valorDoPix: valorCredito,
+        metodoPagamento: "REMOTO",
+        ultimoPagamentoRecebido: new Date()
+      }
+    });
+
+    console.log(`
+========================================
+💰 CRÉDITO REMOTO CLIENTE
+========================================
+🏪 Máquina: ${maquina.nome}
+🆔 ID: ${maquina.id}
+💵 Valor: ${valorCredito}
+💳 Método: REMOTO
+========================================
+`);
+
+    // ==============================
+    // REGISTRA QUEM FEZ O CRÉDITO
+    // ==============================
+    const cliente = await prisma.pix_Cliente.findUnique({
+      where: {
+        id: req.userId,
+      },
+    });
+
+    const ip =
+      req.headers["x-forwarded-for"] ||
+      req.socket.remoteAddress;
+
+    registrarCreditoRemoto(
+      cliente?.email || "",
+      ip,
+      maquina.id,
+      req.body.valor
+    );
+
+    // ==============================
+    // NOTIFICAÇÃO
+    // ==============================
+    if (NOTIFICACOES_CREDITO_REMOTO) {
+
+      notificarDiscord(
+        DISCORD_WEBHOOKS.CREDITO_REMOTO,
+        `CRÉDITO REMOTO DE R$: ${valorCredito} em ${maquina.nome} de ${maquina.cliente?.nome}`,
+        `Enviado pelo cliente: ${req.userId}`
+      );
+    }
+
+    // ==============================
+    // TENTA ENVIAR PELO WEBSOCKET
+    // ==============================
+    void tentarEnviarCreditoViaWs(maquina.id, {
+      source: "CREDITO_REMOTO_CLIENTE"
+    });
+
+    // ==============================
+    // RESPOSTA
+    // ==============================
+    return res.status(200).json({
+      retorno: "CREDITO INSERIDO"
+    });
+
   } catch (err: any) {
-    console.log(err);
-    return res.status(500).json({ "retorno": "ERRO: see: console > view logs" });
+
+    console.log("Erro no crédito remoto:", err);
+
+    return res.status(500).json({
+      retorno: "ERRO: see: console > view logs"
+    });
   }
 });
+
 
 //login ADM 
 app.post("/login-pessoa", async (req, res) => {
