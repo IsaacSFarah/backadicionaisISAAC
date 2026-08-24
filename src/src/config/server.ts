@@ -570,9 +570,11 @@ wss.on("connection", (socket, req) => {
 🧠 Firmware: ${msg?.firmware || ""}
 `);
 
-        void tentarEnviarCreditoViaWs(machineId, { source: "WS_HELLO_SYNC" });
-        return;
-      }
+        setTimeout(() => {
+  void tentarEnviarCreditoViaWs(machineId, {
+    source: "WS_HELLO_SYNC"
+  });
+}, 150);
 
       const conexao = espSockets.get(machineId);
       if (!conexao || conexao.socket !== socket) {
@@ -2860,9 +2862,17 @@ app.post("/credito-remoto", verifyJwtPessoa, async (req: any, res) => {
     // ==============================
     // TENTA ENVIAR PELO WEBSOCKET
     // ==============================
+    const envio = await tentarEnviarCreditoViaWs(maquina.id, {
+  source: "CREDITO_REMOTO_ADM"
+});
+
+if (!envio.enviado) {
+  setTimeout(() => {
     void tentarEnviarCreditoViaWs(maquina.id, {
-      source: "CREDITO_REMOTO_ADM"
+      source: "CREDITO_REMOTO_ADM_RETRY"
     });
+  }, 200);
+}
 
     // ==============================
     // RESPOSTA
@@ -3036,9 +3046,17 @@ app.post("/credito-remoto-cliente", verifyJWT, async (req: any, res) => {
     // ==============================
     // TENTA ENVIAR PELO WEBSOCKET
     // ==============================
+    const envio = await tentarEnviarCreditoViaWs(maquina.id, {
+  source: "CREDITO_REMOTO_CLIENTE"
+});
+
+if (!envio.enviado) {
+  setTimeout(() => {
     void tentarEnviarCreditoViaWs(maquina.id, {
-      source: "CREDITO_REMOTO_CLIENTE"
+      source: "CREDITO_REMOTO_CLIENTE_RETRY"
     });
+  }, 200);
+}
 
     // ==============================
     // RESPOSTA
