@@ -5379,33 +5379,39 @@ app.get("/pagamentos-adm/:maquinaId", verifyJwtPessoa, async (req: any, res) => 
   console.log(`${req.params.maquinaId} acessou a rota de pagamentos.`);
 
   try {
-
-    var totalRecebido = 0.0;
-    var totalEstornado = 0.0;
     var totalEspecie = 0.0;
+    let valorTotal = 0;
+    let valorPix = 0
+    let valorCartaoCredito = 0
+    let valorCartaoDebito = 0
+    let valorCash = 0
+    let qtd = 0
+    let totalBruto = 0
+    let totalLiquido = 0
 
-    // const uuidRegex =
-    //   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    // const maquinaParam = String(req.params.maquinaId ?? "").trim();
-    // const maquina = uuidRegex.test(maquinaParam)
-    //   ? await prisma.pix_Maquina.findUnique({ where: { id: maquinaParam } })
-    //   : await prisma.pix_Maquina.findFirst({ where: { maquininha_serial: maquinaParam } });
-    const maquina = await prisma.pix_Maquina.findUnique({ where: { id: req.params.maquinaId } });
-      // console.log(uuidRegex.test(maquinaParam))
+    let taxaPix = 0
+    let taxaCartaoCredito = 0
+    let taxaCartaoDebito = 0
+
+    const pagamentos = await prisma.pix_Pagamento.findMany({
+      where: {
+        maquinaId: req.params.maquinaId,
+        removido: false
+      },
+      orderBy: {
+        data: 'desc', // 'desc' para ordem decrescente (da mais recente para a mais antiga)
+      }
+    });
+
+    const maquina = await prisma.pix_Maquina.findUnique({
+      where: {
+        id: req.params.maquinaId
+      }
+    });
 
     if (!maquina) {
       return res.status(404).json({ error: 'Máquina não encontrada' });
     }
-
-    const pagamentos = await prisma.pix_Pagamento.findMany({
-      where: {
-        maquinaId: maquina.id,
-        removido: false
-      },
-      orderBy: {
-        data: 'desc',
-      }
-    });
 
     // Verifica se o estoque está definido e retorna seu valor
     const estoque = maquina.estoque !== null ? maquina.estoque : '--';
@@ -5420,6 +5426,22 @@ app.get("/pagamentos-adm/:maquinaId", verifyJwtPessoa, async (req: any, res) => 
         continue;
       }
 
+      if (pagamento.tipo === "CASH" || pagamento.mercadoPagoId === "CASH") {
+        totalEspecie += parseFloat(pagamento.valor)
+        valorCash += parseFloat(pagamento.valor)
+      } else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money") {
+        valorPix += parseFloat(pagamento.valor)
+        taxaPix += parseFloat(pagamento.taxas!)
+      } else if (pagamento.tipo === "debit_card") {
+        valorCartaoDebito += parseFloat(pagamento.valor)
+        taxaCartaoDebito += parseFloat(pagamento.taxas!)
+      } else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card") {
+        valorCartaoCredito += parseFloat(pagamento.valor)
+        taxaCartaoCredito += parseFloat(pagamento.taxas!)
+      }
+
+      qtd += 1;
+
       const valor = parseFloat(pagamento.valor);
 
       if (pagamento.estornado === false) {
@@ -5427,23 +5449,28 @@ app.get("/pagamentos-adm/:maquinaId", verifyJwtPessoa, async (req: any, res) => 
       } else {
         totalComEstorno += valor;
       }
+      totalBruto = totalComEstorno + totalSemEstorno
+      totalLiquido = totalSemEstorno - (taxaCartaoCredito + taxaCartaoDebito + taxaPix)
     }
 
-    const especie = await prisma.pix_Pagamento.findMany({
-      where: {
-        maquinaId: maquina.id,
-        removido: false,
-        mercadoPagoId: `CASH`
-      }
+    return res.status(200).json({
+      "totalBruto": totalBruto,
+      "totalLiquido": totalLiquido,
+      "total": totalSemEstorno,
+      "estornos": totalComEstorno,
+      "cash": totalEspecie,
+      "estoque": estoque,
+      "store_id": maquina.store_id,
+      "pagamentos": pagamentos,
+      "totalCash": valorCash,
+      "totalPix": valorPix,
+      "totalCartaoCredito": valorCartaoCredito,
+      "totalCartaoDebito": valorCartaoDebito,
+      "taxaCartaoCredito": taxaCartaoCredito,
+      "taxaCartaoDebito": taxaCartaoDebito,
+      "taxaPix": taxaPix,
+      "qtd": qtd
     });
-
-    for (const e of especie) {
-      const valor = parseFloat(e.valor);
-      totalEspecie += valor;
-
-    }
-
-    return res.status(200).json({ "total": totalSemEstorno, "estornos": totalComEstorno, "cash": totalEspecie, "estoque": estoque, "store_id": maquina.store_id, "pagamentos": pagamentos });
   } catch (err: any) {
     console.log(err);
     return res.status(500).json({ "retorno": "ERRO" });
@@ -5453,9 +5480,6 @@ app.get("/pagamentos-adm/:maquinaId", verifyJwtPessoa, async (req: any, res) => 
 
 //RELATORIO DE PAGAMENTOS POR MÁQUINA POR PERÍODO
 app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req: any, res) => {
-
-  console.log(req.body.dataInicio)
-  console.log(req.body.dataFim)
 
   try {
 
@@ -5611,11 +5635,29 @@ app.post("/pagamentos-periodo-adm/:maquinaId", verifyJwtPessoa, async (req: any,
 
   try {
 
-    var totalRecebido = 0.0;
-    var totalEstornado = 0.0;
     var totalEspecie = 0.0;
+    let valorTotal = 0;
+    let valorPix = 0
+    let valorCartaoCredito = 0
+    let valorCartaoDebito = 0
+    let valorCash = 0
+    let qtd = 0
+    let totalBruto = 0
+    let totalLiquido = 0
+
+    let taxaPix = 0
+    let taxaCartaoCredito = 0
+    let taxaCartaoDebito = 0
+
     let dataInicio: Date;
     let dataFim: Date;
+
+    const dataInicioFiltro = new Date(req.body.dataInicio);
+    const dataFimFiltro = new Date(req.body.dataFim);
+
+
+    let inicioFiltro: Date | null = null;
+    let fimFiltro: Date | null = null;
 
     if (!req.body.dataInicio || !req.body.dataFim) {
       dataFim = new Date();
@@ -5625,31 +5667,46 @@ app.post("/pagamentos-periodo-adm/:maquinaId", verifyJwtPessoa, async (req: any,
       dataInicio = new Date(req.body.dataInicio);
       dataFim = new Date(req.body.dataFim);
 
-      if (isNaN(dataInicio.getTime()) || isNaN(dataFim.getTime())) {
-        return res.status(400).json({
-          error: "Datas inválidas",
-        });
-      }
+      // if (isNaN(dataInicio.getTime()) || isNaN(dataFim.getTime())) {
+      //   return res.status(400).json({
+      //     error: "Datas inválidas",
+      //   });
+      // }
+
+      // Trabalha 100% em UTC (sem gambiarra)
+      //       const inicio = new Date(Date.UTC(
+      //         dataInicioFiltro.getUTCFullYear(),
+      //         dataInicioFiltro.getUTCMonth(),
+      //         dataInicioFiltro.getUTCDate(),
+      //         0, 0, 0, 0
+      //       ));
+
+      //       const fim = new Date(Date.UTC(
+      //         dataFimFiltro.getUTCFullYear(),
+      //         dataFimFiltro.getUTCMonth(),
+      //         dataFimFiltro.getUTCDate(),
+      //         23, 59, 59, 999
+      //       ));
+
+      //       dataInicio = inicio;
+      //       dataFim = fim;
+
+      //       console.log("FILTRO UTC INICIO:", inicio.toISOString());
+      // console.log("FILTRO UTC FIM:", fim.toISOString());
+
+      // dataInicio = new Date(req.body.dataInicio);
+      // dataInicio.setHours(0, 0, 0, 0);
+
+      // dataFim = new Date(req.body.dataFim);
+      // dataFim.setHours(0, 0, 0, 0);
+      // dataFim.setDate(dataFim.getDate() + 1);
     }
-    dataInicio.setHours(0, 0, 0, 0);
-    dataFim.setHours(23, 59, 59, 999);
-
-    // const uuidRegex =
-    //   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-    // const maquinaParam = String(req.params.maquinaId ?? "").trim();
-    // const maquina = uuidRegex.test(maquinaParam)
-    //   ? await prisma.pix_Maquina.findUnique({ where: { id: maquinaParam } })
-    //   : await prisma.pix_Maquina.findFirst({ where: { maquininha_serial: maquinaParam } });
-
-      const maquina  = await prisma.pix_Maquina.findUnique({ where: { id: req.params.maquinaId } })
-
-    if (!maquina) {
-      return res.status(404).json({ error: "Máquina não encontrada" });
-    }
+    // dataInicio.setUTCHours(0, 0, 0, 0);
+    // dataFim.setUTCHours(23, 59, 59, 999);
 
     const pagamentos = await prisma.pix_Pagamento.findMany({
       where: {
-        maquinaId: maquina.id,
+        maquinaId: req.params.maquinaId,
         data: {
           gte: dataInicio,
           lte: dataFim,
@@ -5660,46 +5717,65 @@ app.post("/pagamentos-periodo-adm/:maquinaId", verifyJwtPessoa, async (req: any,
       }
     });
 
+    const maquina = await prisma.pix_Maquina.findUnique({
+      where: {
+        id: req.params.maquinaId
+      }
+    });
+
     let totalSemEstorno = 0;
     let totalComEstorno = 0;
+
 
     for (const pagamento of pagamentos) {
       if (pagamento?.tipo === "SAIDA_PRODUTO" || pagamento?.mercadoPagoId === "saiu premio") {
         continue;
       }
 
-      if (pagamento.mercadoPagoId === 'CASH') {
-        const valor = parseFloat(pagamento.valor);
-        totalEspecie += valor;
+      if (pagamento.tipo === "CASH" || pagamento.mercadoPagoId === "CASH") {
+        totalEspecie += parseFloat(pagamento.valor)
+        valorCash += parseFloat(pagamento.valor)
+      } else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money" || pagamento.tipo === "digital_currency" || pagamento.tipo === "11") {
+        valorPix += parseFloat(pagamento.valor)
+        taxaPix += parseFloat(pagamento.taxas!)
+      } else if (pagamento.tipo === "debit_card" || pagamento.tipo === "8") {
+        valorCartaoDebito += parseFloat(pagamento.valor)
+        taxaCartaoDebito += parseFloat(pagamento.taxas!)
+      } else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card" || pagamento.tipo === "1") {
+        valorCartaoCredito += parseFloat(pagamento.valor)
+        taxaCartaoCredito += parseFloat(pagamento.taxas!)
       }
 
-      const valor = parseFloat(pagamento.valor);
+      qtd += 1;
 
+      const valor = parseFloat(pagamento.valor);
+      
       if (pagamento.estornado === false) {
         totalSemEstorno += valor;
       } else {
         totalComEstorno += valor;
       }
+      totalBruto = totalComEstorno + totalSemEstorno
+      totalLiquido = totalSemEstorno - (taxaCartaoCredito + taxaCartaoDebito + taxaPix)
     }
 
-    // const especie = await prisma.pix_Pagamento.findMany({
-    //   where: {
-    //     maquinaId: req.params.maquinaId,
-    //     removido: false,
-    //     mercadoPagoId: `CASH`,
-    //     data: {
-    //       gte: dataInicio,
-    //       lte: dataFim,
-    //     },
-    //   }
-    // });
-
-    // for (const e of especie) {
-    //   const valor = parseFloat(e.valor);
-    //   totalEspecie += valor;
-    // }
-
-    return res.status(200).json({ "total": totalSemEstorno, "estornos": totalComEstorno, "cash": totalEspecie, "store_id": maquina?.store_id, "pagamentos": pagamentos });
+    return res.status(200).json({
+      "totalBruto": totalBruto,
+      "totalLiquido": totalLiquido,
+      "total": totalSemEstorno,
+      "estornos": totalComEstorno,
+      "cash": totalEspecie,
+      "store_id": maquina?.store_id,
+      "pagamentos": pagamentos,
+      "totalCash": valorCash,
+      "totalPix": valorPix,
+      "totalCartaoCredito": valorCartaoCredito,
+      "totalCartaoDebito": valorCartaoDebito,
+      "taxaCartaoCredito": taxaCartaoCredito,
+      "taxaCartaoDebito": taxaCartaoDebito,
+      "taxaPix": taxaPix,
+      "qtd": qtd
+    });
   } catch (err: any) {
     console.log(err);
     return res.status(500).json({ "retorno": "ERRO" });
@@ -5765,12 +5841,9 @@ app.delete('/delete-pagamento-cliente/:pagamentoId', verifyJWT, async (req, res)
 
   try {
     // Deletar um pagamento específico
-    await prisma.pix_Pagamento.update({
+    await prisma.pix_Pagamento.delete({
       where: {
         id: pagamentoId
-      },
-      data: {
-        removido: true
       }
     });
 
