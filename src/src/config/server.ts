@@ -4262,7 +4262,7 @@ app.post("/rota-recebimento-mercado-pago-dinamica/:id", async (req: any, res: an
   let tokenClienteGlobal = "";
   try {
     if (req.query.id === "123456") {
-      return res.status(200).json({ status: "ok",msg:'Webhook reebendo notificações do Mercado Pago' });
+      res.sendStatus(200);
     }
     console.log("📩 Webhook recebido:", JSON.stringify(req.body));
     // ================================
