@@ -196,25 +196,52 @@ function limparSocketEsp(machineId: string, socket?: WebSocket) {
   }
 }
 
-async function registrarHeartbeatEsp(machineId: string, nivelDeSinal?: number | null) {
+async function registrarHeartbeatEsp(
+  machineId: string,
+  nivelDeSinal?: number | null
+) {
   const agora = Date.now();
   const ultima = espUltimoHeartbeat.get(machineId) || 0;
+
   if (agora - ultima < ESP_HEARTBEAT_WRITE_MS) return;
 
+  console.log("========== HEARTBEAT DEBUG ==========");
+  console.log("machineId recebido:", machineId);
+  console.log("tipo:", typeof machineId);
+
+  const maquinaDebug = await prisma.pix_Maquina.findUnique({
+    where: { id: machineId },
+    select: {
+      id: true,
+      nome: true,
+    },
+  });
+
+  console.log("Máquina encontrada:", maquinaDebug);
+  console.log("=====================================");
+
   espUltimoHeartbeat.set(machineId, agora);
+
   const dataAtualizacao: any = {
     ultimaRequisicao: new Date(),
   };
-  if (nivelDeSinal !== null && nivelDeSinal !== undefined && !Number.isNaN(nivelDeSinal)) {
+
+  if (
+    nivelDeSinal !== null &&
+    nivelDeSinal !== undefined &&
+    !Number.isNaN(nivelDeSinal)
+  ) {
     dataAtualizacao.nivelDeSinal = nivelDeSinal;
   }
 
-  await prisma.pix_Maquina.update({
-    where: { id: machineId },
-    data: dataAtualizacao,
-  }).catch((err) => {
-    console.error("Erro ao registrar heartbeat WS da ESP:", err);
-  });
+  await prisma.pix_Maquina
+    .update({
+      where: { id: machineId },
+      data: dataAtualizacao,
+    })
+    .catch((err) => {
+      console.error("Erro ao registrar heartbeat WS da ESP:", err);
+    });
 }
 
 function calcularPulsosParaMaquinaWs(maquina: any) {
