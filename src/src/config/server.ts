@@ -481,18 +481,61 @@ async function confirmarPendenciaWs(requestId: string, machineId: string, nivelD
   });
 
   if (pendencia.pagamentoId) {
-    await prisma.pix_Pagamento.updateMany({
+  try {
+    const resultadoConfirmacao = await prisma.pix_Pagamento.updateMany({
       where: {
         id: pendencia.pagamentoId,
         estornado: false,
+        status: "PENDENTE",
       },
       data: {
         status: "CONFIRMADO",
       },
-    }).catch((err) => {
-      console.error("Erro ao confirmar pagamento após ACK WS:", err);
     });
+
+    if (resultadoConfirmacao.count > 0) {
+      const pagamentoConfirmado = await prisma.pix_Pagamento.findUnique({
+        where: {
+          id: pendencia.pagamentoId,
+        },
+        include: {
+          maquina: true,
+        },
+      });
+
+      if (
+        pagamentoConfirmado &&
+        pagamentoConfirmado.clienteId
+      ) {
+        const valorFormatado = Number(
+          pagamentoConfirmado.valor
+        )
+          .toFixed(2)
+          .replace(".", ",");
+
+        const tipoPagamento =
+          pagamentoConfirmado.tipo === "credit_card"
+            ? "CRÉDITO"
+            : pagamentoConfirmado.tipo === "debit_card"
+              ? "DÉBITO"
+              : pagamentoConfirmado.tipo === "bank_transfer"
+                ? "PIX"
+                : pagamentoConfirmado.tipo || "PAGAMENTO";
+
+        await enviarPushCliente(
+          String(pagamentoConfirmado.clienteId),
+          "Pagamento recebido 💰",
+          `${pagamentoConfirmado.maquina.nome || "Máquina"} recebeu R$ ${valorFormatado} via ${tipoPagamento}`
+        );
+      }
+    }
+  } catch (err) {
+    console.error(
+      "Erro ao confirmar pagamento após ACK WS:",
+      err
+    );
   }
+}
 
   console.log(`
 ✅ ACK RECEBIDO VIA WS
