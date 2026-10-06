@@ -37,6 +37,54 @@ if (firebaseServiceAccountJson && !admin.apps.length) {
   }
 }
 
+async function enviarPushCliente(
+  clienteId: string,
+  titulo: string,
+  mensagem: string
+) {
+  try {
+    if (!admin.apps.length) {
+      console.log("⚠️ Firebase Admin não inicializado");
+      return;
+    }
+
+    const registros = await prisma.pix_FcmToken.findMany({
+      where: {
+        clienteId: clienteId,
+      },
+    });
+
+    if (registros.length === 0) {
+      console.log(`🔕 Cliente ${clienteId} não possui FCM registrado`);
+      return;
+    }
+
+    for (const registro of registros) {
+      try {
+        await admin.messaging().send({
+          token: registro.token,
+          notification: {
+            title: titulo,
+            body: mensagem,
+          },
+          android: {
+            priority: "high",
+          },
+        });
+
+        console.log(`🔔 Push enviado para cliente ${clienteId}`);
+      } catch (error: any) {
+        console.error(
+          `❌ Erro ao enviar push para ${clienteId}:`,
+          error?.code || error?.message || error
+        );
+      }
+    }
+  } catch (error) {
+    console.error("❌ Erro na função enviarPushCliente:", error);
+  }
+}
+
 // Constantes de configuração
 const PORT: string | number = process.env.PORT || 5001;
 const SALT_ROUNDS = 10;
