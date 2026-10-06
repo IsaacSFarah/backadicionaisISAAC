@@ -264,12 +264,16 @@ function limparSocketEsp(machineId: string, socket?: WebSocket) {
 
 async function registrarHeartbeatEsp(
   machineId: string,
-  nivelDeSinal?: number | null
+  nivelDeSinal?: number | null,
+  notificarOnline: boolean = false
 ) {
   const agora = Date.now();
   const ultima = espUltimoHeartbeat.get(machineId) || 0;
 
-  if (agora - ultima < ESP_HEARTBEAT_WRITE_MS) return;
+  if (
+  !notificarOnline &&
+  agora - ultima < ESP_HEARTBEAT_WRITE_MS
+) return;
 
   console.log("========== HEARTBEAT DEBUG ==========");
   console.log("machineId recebido:", machineId);
@@ -316,8 +320,11 @@ const estavaOffline =
       console.error("Erro ao registrar heartbeat WS da ESP:", err);
     });
 
-  if (estavaOffline && maquinaDebug?.clienteId) {
-  maquinasNotificadasOffline.delete(machineId);
+  if (
+  notificarOnline &&
+  estavaOffline &&
+  maquinaDebug?.clienteId
+) {
 
   await enviarPushCliente(
     String(maquinaDebug.clienteId),
@@ -755,7 +762,11 @@ wss.on("connection", (socket, req) => {
         });
         espSocketToMachineId.set(socket, machineId);
 
-        await registrarHeartbeatEsp(machineId, nivelDeSinal);
+        await registrarHeartbeatEsp(
+  machineId,
+  nivelDeSinal,
+  true
+);
 
         socket.send(JSON.stringify({
           type: "hello_ack",
