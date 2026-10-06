@@ -5537,6 +5537,12 @@ app.post("/decrementar-estoque/:id/", async (req: any, res: any) => {
       console.log(`Saída de ${quantidade} produto(s) registrada para o cliente ${maquina.cliente?.nome} com valor acumulado de R$ ${valorAcumulado.toFixed(2)}`);
     }
 
+    await enviarPushCliente(
+  String(maquina.clienteId),
+  "Saiu Produto 🎁",
+  `${maquina.nome || "Máquina"} liberou ${quantidade} produto(s) • Gerou R$ ${valorAcumulado.toFixed(2).replace(".", ",")}`
+);
+
     if (NOTIFICACOES_ESTOQUE) {
       notificarDiscord(DISCORD_WEBHOOKS.ESTOQUE, `Item vendido.`, ` Maquina: ${maquina?.nome}. Maquina: ${maquina?.descricao}. Cliente: ${maquina.cliente?.nome}`)
     }
