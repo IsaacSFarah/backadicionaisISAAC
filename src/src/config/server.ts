@@ -3219,6 +3219,53 @@ app.post("/login-cliente", async (req, res) => {
   }
 });
 
+app.post("/registrar-fcm-token", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Token de autenticação não informado" });
+    }
+
+    const jwtToken = authHeader.substring(7);
+
+    const decoded = jwt.verify(jwtToken, SECRET as string) as {
+      userId: string;
+    };
+
+    const fcmToken = String(req.body.token || "").trim();
+
+    if (!fcmToken) {
+      return res.status(400).json({ error: "FCM token não informado" });
+    }
+
+    await prisma.pix_FcmToken.upsert({
+      where: {
+        token: fcmToken,
+      },
+      update: {
+        clienteId: decoded.userId,
+      },
+      create: {
+        token: fcmToken,
+        clienteId: decoded.userId,
+      },
+    });
+
+    console.log(`🔔 FCM registrado para cliente ${decoded.userId}`);
+
+    return res.json({
+      success: true,
+    });
+  } catch (error) {
+    console.error("❌ Erro ao registrar FCM:", error);
+
+    return res.status(401).json({
+      error: "Não foi possível registrar o FCM token",
+    });
+  }
+});
+
 
 app.post("/login-funcionario", async (req, res) => {
   try {
