@@ -167,6 +167,7 @@ const httpServer = createServer(app);
 const processandoWebhooks = new Set<string>();
 const espInFlight = new Set<string>();
 const espUltimoHeartbeat = new Map<string, number>();
+const maquinasNotificadasOffline = new Set<string>();
 const monitoramentoCache = new Map<string, number>();
 const dashboardCache = new Map<string, { data: any; expiresAt: number; lastAccessAt: number }>();
 const espSockets = new Map<string, {
@@ -314,16 +315,19 @@ const estavaOffline =
     .catch((err) => {
       console.error("Erro ao registrar heartbeat WS da ESP:", err);
     });
-  if (
-  estavaOffline &&
-  maquinaDebug?.clienteId
-) {
+
+  if (estavaOffline && maquinaDebug?.clienteId) {
+  maquinasNotificadasOffline.delete(machineId);
+
   await enviarPushCliente(
     String(maquinaDebug.clienteId),
     "Máquina Online 🟢",
     `${maquinaDebug.nome || "Máquina"} ficou online`
   );
+} else {
+  maquinasNotificadasOffline.delete(machineId);
 }
+  
 }
 
 function calcularPulsosParaMaquinaWs(maquina: any) {
@@ -634,6 +638,52 @@ setInterval(() => {
   void processarPagamentosPendentes();
 }, 10000);
 
+setInterval(async () => {
+  try {
+    const limiteOffline = new Date(
+      Date.now() - MAQUINA_OFFLINE_ESTORNO_SEGUNDOS * 1000
+    );
+
+    const maquinasOffline = await prisma.pix_Maquina.findMany({
+      where: {
+        ultimaRequisicao: {
+          lt: limiteOffline,
+        },
+      },
+      select: {
+        id: true,
+        nome: true,
+        clienteId: true,
+      },
+    });
+
+    for (const maquina of maquinasOffline) {
+      // Já avisamos sobre esta queda.
+      if (maquinasNotificadasOffline.has(maquina.id)) {
+        continue;
+      }
+
+      // Marca antes do envio para impedir duplicidade.
+      maquinasNotificadasOffline.add(maquina.id);
+
+      if (!maquina.clienteId) {
+        continue;
+      }
+
+      await enviarPushCliente(
+        String(maquina.clienteId),
+        "Máquina Offline 🔴",
+        `${maquina.nome || "Máquina"} ficou offline`
+      );
+    }
+  } catch (err) {
+    console.error(
+      "Erro ao monitorar máquinas offline:",
+      err
+    );
+  }
+}, 15000);
+
 setInterval(() => {
   const limite = Date.now() - 26 * 60 * 60 * 1000;
   for (const [k, ts] of monitoramentoCache) {
@@ -771,56 +821,8 @@ wss.on("connection", (socket, req) => {
   if (!machineId) return;
 
   limparSocketEsp(machineId, socket);
+
   console.log(`🔌 ESP DESCONECTOU VIA WS: ${machineId}`);
-
-  setTimeout(async () => {
-    try {
-      // Se já reconectou, não está offline.
-      if (espSockets.has(machineId)) {
-        return;
-      }
-
-      const maquina = await prisma.pix_Maquina.findUnique({
-        where: {
-          id: machineId,
-        },
-        select: {
-          nome: true,
-          clienteId: true,
-          ultimaRequisicao: true,
-        },
-      });
-
-      if (!maquina || !maquina.clienteId) {
-        return;
-      }
-
-      const continuaOffline =
-        !maquina.ultimaRequisicao ||
-        tempoOffline(maquina.ultimaRequisicao) >=
-          MAQUINA_OFFLINE_ESTORNO_SEGUNDOS;
-
-      if (!continuaOffline) {
-        return;
-      }
-
-      // Confere novamente se não reconectou durante a consulta.
-      if (espSockets.has(machineId)) {
-        return;
-      }
-
-      await enviarPushCliente(
-        String(maquina.clienteId),
-        "Máquina Offline 🔴",
-        `${maquina.nome || "Máquina"} ficou offline`
-      );
-    } catch (err) {
-      console.error(
-        `Erro ao verificar OFFLINE da máquina ${machineId}:`,
-        err
-      );
-    }
-  }, MAQUINA_OFFLINE_ESTORNO_SEGUNDOS * 1000);
 });
 
   socket.on("error", (err) => {
@@ -2711,12 +2713,29 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
         bonusAtivo: true,
         bonusMetodos: true,
         bonusRegras: true,
+        ultimaRequisicao: true,
       },
     });
 
     let pulsosFormatados = "0000";
 
     if (maquina) {
+      const estavaOffline =
+  !maquina.ultimaRequisicao ||
+  tempoOffline(maquina.ultimaRequisicao) >=
+    MAQUINA_OFFLINE_ESTORNO_SEGUNDOS;
+
+if (estavaOffline && maquina.clienteId) {
+  maquinasNotificadasOffline.delete(maquinaId);
+
+  void enviarPushCliente(
+    String(maquina.clienteId),
+    "Máquina Online 🟢",
+    `${maquina.nome || "Máquina"} ficou online`
+  );
+} else {
+  maquinasNotificadasOffline.delete(maquinaId);
+}
 
       const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
       const sinalInt =
@@ -2806,11 +2825,47 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
         select: { id: true },
       });
       if (pagamentoPendente) {
-        await prisma.pix_Pagamento.update({
-          where: { id: pagamentoPendente.id },
-          data: { status: "CONFIRMADO" },
-        });
-      }
+  await prisma.pix_Pagamento.update({
+    where: { id: pagamentoPendente.id },
+    data: { status: "CONFIRMADO" },
+  });
+
+  const pagamentoConfirmado =
+      await prisma.pix_Pagamento.findUnique({
+    where: {
+      id: pagamentoPendente.id,
+    },
+    include: {
+      maquina: true,
+    },
+  });
+
+  if (
+    pagamentoConfirmado &&
+    pagamentoConfirmado.clienteId
+  ) {
+    const valorFormatado = Number(
+      pagamentoConfirmado.valor
+    )
+        .toFixed(2)
+        .replace(".", ",");
+
+    const tipoPagamento =
+        pagamentoConfirmado.tipo === "credit_card"
+            ? "CRÉDITO"
+            : pagamentoConfirmado.tipo === "debit_card"
+                ? "DÉBITO"
+                : pagamentoConfirmado.tipo === "bank_transfer"
+                    ? "PIX"
+                    : pagamentoConfirmado.tipo || "PAGAMENTO";
+
+    await enviarPushCliente(
+      String(pagamentoConfirmado.clienteId),
+      "Pagamento recebido 💰",
+      `${pagamentoConfirmado.maquina.nome || "Máquina"} recebeu R$ ${valorFormatado} via ${tipoPagamento}`
+    );
+  }
+}
 
       const metodoPagamento = String(maquina.metodoPagamento || "PIX").toUpperCase();
 
