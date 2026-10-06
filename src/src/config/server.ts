@@ -275,13 +275,20 @@ async function registrarHeartbeatEsp(
   console.log("tipo:", typeof machineId);
 
   const maquinaDebug = await prisma.pix_Maquina.findUnique({
-    where: { id: machineId },
-    select: {
-      id: true,
-      nome: true,
-    },
-  });
+  where: { id: machineId },
+  select: {
+    id: true,
+    nome: true,
+    clienteId: true,
+    ultimaRequisicao: true,
+  },
+});
 
+const estavaOffline =
+  !maquinaDebug?.ultimaRequisicao ||
+  tempoOffline(maquinaDebug.ultimaRequisicao) >=
+    MAQUINA_OFFLINE_ESTORNO_SEGUNDOS;
+  
   console.log("Máquina encontrada:", maquinaDebug);
   console.log("=====================================");
 
@@ -307,6 +314,16 @@ async function registrarHeartbeatEsp(
     .catch((err) => {
       console.error("Erro ao registrar heartbeat WS da ESP:", err);
     });
+  if (
+  estavaOffline &&
+  maquinaDebug?.clienteId
+) {
+  await enviarPushCliente(
+    String(maquinaDebug.clienteId),
+    "Máquina Online 🟢",
+    `${maquinaDebug.nome || "Máquina"} ficou online`
+  );
+}
 }
 
 function calcularPulsosParaMaquinaWs(maquina: any) {
@@ -750,11 +767,61 @@ wss.on("connection", (socket, req) => {
   });
 
   socket.on("close", () => {
-    const machineId = espSocketToMachineId.get(socket);
-    if (!machineId) return;
-    limparSocketEsp(machineId, socket);
-    console.log(`🔌 ESP OFFLINE VIA WS: ${machineId}`);
-  });
+  const machineId = espSocketToMachineId.get(socket);
+  if (!machineId) return;
+
+  limparSocketEsp(machineId, socket);
+  console.log(`🔌 ESP DESCONECTOU VIA WS: ${machineId}`);
+
+  setTimeout(async () => {
+    try {
+      // Se já reconectou, não está offline.
+      if (espSockets.has(machineId)) {
+        return;
+      }
+
+      const maquina = await prisma.pix_Maquina.findUnique({
+        where: {
+          id: machineId,
+        },
+        select: {
+          nome: true,
+          clienteId: true,
+          ultimaRequisicao: true,
+        },
+      });
+
+      if (!maquina || !maquina.clienteId) {
+        return;
+      }
+
+      const continuaOffline =
+        !maquina.ultimaRequisicao ||
+        tempoOffline(maquina.ultimaRequisicao) >=
+          MAQUINA_OFFLINE_ESTORNO_SEGUNDOS;
+
+      if (!continuaOffline) {
+        return;
+      }
+
+      // Confere novamente se não reconectou durante a consulta.
+      if (espSockets.has(machineId)) {
+        return;
+      }
+
+      await enviarPushCliente(
+        String(maquina.clienteId),
+        "Máquina Offline 🔴",
+        `${maquina.nome || "Máquina"} ficou offline`
+      );
+    } catch (err) {
+      console.error(
+        `Erro ao verificar OFFLINE da máquina ${machineId}:`,
+        err
+      );
+    }
+  }, MAQUINA_OFFLINE_ESTORNO_SEGUNDOS * 1000);
+});
 
   socket.on("error", (err) => {
     const machineId = espSocketToMachineId.get(socket);
