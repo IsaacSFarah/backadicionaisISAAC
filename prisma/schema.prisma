@@ -73,6 +73,7 @@ model Pix_Cliente {
   Cobranca             Pix_Cobranca[]
   funcionario          Funcionario[]
   PagamentoCliente     Pix_PagamentoCliente[]
+  FcmToken             Pix_FcmToken[]
 }
 
 model Pix_Pagamento {
@@ -196,4 +197,15 @@ enum StatusPgto {
   ABERTO
   VENCIDO
   PAGO
+}
+
+model Pix_FcmToken {
+  id        String      @id @default(uuid())
+  token     String      @unique
+  clienteId String
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  cliente   Pix_Cliente @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+
+  @@index([clienteId])
 }
