@@ -16,9 +16,26 @@ import { Console, error } from "console";
 import { createServer } from "http";
 import { randomUUID } from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
+import admin from "firebase-admin";
 
 // Configuração de variáveis de ambiente
 dotenv.config();
+
+const firebaseServiceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+
+if (firebaseServiceAccountJson && !admin.apps.length) {
+  try {
+    const firebaseServiceAccount = JSON.parse(firebaseServiceAccountJson);
+
+    admin.initializeApp({
+      credential: admin.credential.cert(firebaseServiceAccount),
+    });
+
+    console.log("🔥 Firebase Admin inicializado com sucesso");
+  } catch (error) {
+    console.error("❌ Erro ao inicializar Firebase Admin:", error);
+  }
+}
 
 // Constantes de configuração
 const PORT: string | number = process.env.PORT || 5001;
