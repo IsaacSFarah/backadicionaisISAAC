@@ -73,12 +73,37 @@ async function enviarPushCliente(
         });
 
         console.log(`🔔 Push enviado para cliente ${clienteId}`);
-      } catch (error: any) {
-        console.error(
-          `❌ Erro ao enviar push para ${clienteId}:`,
-          error?.code || error?.message || error
-        );
-      }
+     } catch (error: any) {
+  const codigoErro = error?.code || "";
+
+  console.error(
+    `❌ Erro ao enviar push para ${clienteId}:`,
+    codigoErro || error?.message || error
+  );
+
+  // Remove automaticamente tokens que não existem mais no Firebase
+  if (
+    codigoErro === "messaging/registration-token-not-registered" ||
+    codigoErro === "messaging/invalid-registration-token"
+  ) {
+    try {
+      await prisma.pix_FcmToken.delete({
+        where: {
+          id: registro.id,
+        },
+      });
+
+      console.log(
+        `🧹 Token FCM inválido removido do cliente ${clienteId}`
+      );
+    } catch (erroDelete) {
+      console.error(
+        `❌ Erro ao remover token FCM inválido:`,
+        erroDelete
+      );
+    }
+  }
+}
     }
   } catch (error) {
     console.error("❌ Erro na função enviarPushCliente:", error);
