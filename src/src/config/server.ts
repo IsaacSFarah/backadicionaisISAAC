@@ -2742,17 +2742,18 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
         id: maquinaId,
       },
       select: {
-        id: true,
-        clienteId: true,
-        nome: true,
-        valorDoPix: true,
-        valorDoPulso: true,
-        metodoPagamento: true,
-        bonusAtivo: true,
-        bonusMetodos: true,
-        bonusRegras: true,
-        ultimaRequisicao: true,
-      },
+  id: true,
+  clienteId: true,
+  nome: true,
+  valorDoPix: true,
+  valorDoPulso: true,
+  metodoPagamento: true,
+  bonusAtivo: true,
+  bonusMetodos: true,
+  bonusRegras: true,
+  ultimaRequisicao: true,
+  bloqueadaMensalidade: true,
+},
     });
 
     let pulsosFormatados = "0000";
@@ -2776,21 +2777,24 @@ if (estavaOffline && maquina.clienteId) {
 }
 
       const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
-      const sinalInt =
-        nivelDeSinal != undefined
-          ? normalizeSignalLevel(parseInt(String(nivelDeSinal), 10))
-          : null;
-      if (bloqueio.bloqueado) {
-        await prisma.pix_Maquina.update({
-          where: { id: maquinaId },
-          data: {
-            valorDoPix: "0",
-            ultimaRequisicao: new Date(),
-            nivelDeSinal: sinalInt,
-          },
-        });
-        return res.status(200).json({ retorno: "0000" });
-      }
+
+const sinalInt =
+  nivelDeSinal != undefined
+    ? normalizeSignalLevel(parseInt(String(nivelDeSinal), 10))
+    : null;
+
+if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
+  await prisma.pix_Maquina.update({
+    where: { id: maquinaId },
+    data: {
+      valorDoPix: "0",
+      ultimaRequisicao: new Date(),
+      nivelDeSinal: sinalInt,
+    },
+  });
+
+  return res.status(200).json({ retorno: "0000" });
+}
 
       const requestIdWsPendente = espWsPendenciaPorMaquina.get(maquinaId);
       if (requestIdWsPendente) {
@@ -5346,11 +5350,15 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
 
     const value = Number(req.query.valor);
 
-    if (maquina) {
-      const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
-      if (bloqueio.bloqueado) {
-        return res.status(403).json({ retorno: "CLIENTE_BLOQUEADO" });
-      }
+    const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
+
+if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
+  return res.status(403).json({
+    retorno: bloqueio.bloqueado
+      ? "CLIENTE_BLOQUEADO"
+      : "MAQUINA_BLOQUEADA_MENSALIDADE"
+  });
+}
 
       const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || "");
       console.log(`
