@@ -5350,17 +5350,18 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
 
     const value = Number(req.query.valor);
 
-    const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
+if (maquina) {
+  const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
 
-if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
-  return res.status(403).json({
-    retorno: bloqueio.bloqueado
-      ? "CLIENTE_BLOQUEADO"
-      : "MAQUINA_BLOQUEADA_MENSALIDADE"
-  });
-}
+  if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
+    return res.status(403).json({
+      retorno: bloqueio.bloqueado
+        ? "CLIENTE_BLOQUEADO"
+        : "MAQUINA_BLOQUEADA_MENSALIDADE"
+    });
+  }
 
-      const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || "");
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || "");
       console.log(`
 💵 RECEBIMENTO EM ESPÉCIE
 👤 Cliente: ${maquina?.cliente?.nome || ""} (${maquina.clienteId})
