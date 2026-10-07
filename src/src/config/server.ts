@@ -2322,14 +2322,21 @@ app.put("/maquina", verifyJwtPessoa, async (req: any, res) => {
     // Se não houver conflitos, atualiza a máquina
     // Monta o objeto de atualização sem sobrescrever campos não enviados
     const dataUpdate1: any = {
-      nome: req.body.nome,
-      descricao: req.body.descricao,
-      valorDoPulso: req.body.valorDoPulso,
-      estoque: req.body.estoque,
-      bonusAtivo: req.body.bonusAtivo,
-      bonusRegras: req.body.bonusRegras,
-      bonusMetodos: req.body.bonusMetodos,
-    };
+  nome: req.body.nome,
+  descricao: req.body.descricao,
+  valorDoPulso: req.body.valorDoPulso,
+  estoque: req.body.estoque,
+  bonusAtivo: req.body.bonusAtivo,
+  bonusRegras: req.body.bonusRegras,
+  bonusMetodos: req.body.bonusMetodos,
+};
+
+if (typeof req.body.bloqueadaMensalidade === "boolean") {
+  dataUpdate1.bloqueadaMensalidade = req.body.bloqueadaMensalidade;
+}
+
+// Atualiza store_id somente se vier no body; vazio limpa explicitamente
+if (typeof req.body.store_id !== 'undefined') {
 
     // Atualiza store_id somente se vier no body; vazio limpa explicitamente
     if (typeof req.body.store_id !== 'undefined') {
