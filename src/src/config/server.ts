@@ -2335,23 +2335,15 @@ if (typeof req.body.bloqueadaMensalidade === "boolean") {
   dataUpdate1.bloqueadaMensalidade = req.body.bloqueadaMensalidade;
 }
 
-// Atualiza store_id somente se vier no body; vazio limpa explicitamente
 if (typeof req.body.store_id !== 'undefined') {
+  dataUpdate1.store_id = req.body.store_id === "" ? null : req.body.store_id;
+}
 
-    // Atualiza store_id somente se vier no body; vazio limpa explicitamente
-    if (typeof req.body.store_id !== 'undefined') {
-      dataUpdate1.store_id = req.body.store_id === "" ? null : req.body.store_id;
-    }
+if (typeof req.body.maquininha_serial !== 'undefined') {
+  dataUpdate1.maquininha_serial = req.body.maquininha_serial === "" ? null : req.body.maquininha_serial;
+}
 
-    // Atualiza maquininha_serial somente se vier no body; vazio limpa explicitamente
-    if (typeof req.body.maquininha_serial !== 'undefined') {
-      dataUpdate1.maquininha_serial = req.body.maquininha_serial === "" ? null : req.body.maquininha_serial;
-    }
-
-    const maquinaAtualizada = await prisma.pix_Maquina.update({
-      where: { id: req.body.id },
-      data: dataUpdate1,
-    });
+const maquinaAtualizada = await prisma.pix_Maquina.update({
 
     console.log('Máquina atualizada com sucesso:', maquinaAtualizada);
 
