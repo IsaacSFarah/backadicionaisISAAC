@@ -5535,7 +5535,7 @@ app.post("/decrementar-estoque/:id/", async (req: any, res: any) => {
       });
 
       console.log(`Saída de ${quantidade} produto(s) registrada para o cliente ${maquina.cliente?.nome} com valor acumulado de R$ ${valorAcumulado.toFixed(2)}`);
-    }
+    
 
     await enviarPushCliente(
   String(maquina.clienteId),
