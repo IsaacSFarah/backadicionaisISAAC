@@ -23,6 +23,7 @@ model Pix_Maquina {
   ultimaRequisicao        DateTime?
   nivelDeSinal            Int?
   bonusAtivo              Boolean         @default(false)
+  bloqueadaMensalidade    Boolean         @default(false)
   bonusRegras             Json?           @default("[{\"valorMinimo\": 10, \"bonus\": 2}, {\"valorMinimo\": 20, \"bonus\": 4}, {\"valorMinimo\": 50, \"bonus\": 10}]")
   bonusMetodos            Json? @default("[\"PIX\"]")
   metodoPagamento         String?
