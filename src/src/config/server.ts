@@ -2283,26 +2283,30 @@ app.put("/maquina", verifyJwtPessoa, async (req: any, res) => {
     });
 
     if (!maquina) {
-      return res.status(404).json({ error: "Nenhuma máquina encontrada com o id fornecido." });
+      return res.status(404).json({
+        error: "Nenhuma máquina encontrada com o id fornecido."
+      });
     }
 
-
-    // Condições para verificar duplicidade somente se os valores de store_id e maquininha_serial não forem vazios
+    // Verifica duplicidade dentro do mesmo cliente
     const filtroDuplicidade: any = {
       AND: [
-        { clienteId: maquina.clienteId }, // Filtra pelo cliente
+        { clienteId: maquina.clienteId },
         {
           OR: [
             req.body.nome ? { nome: req.body.nome } : undefined,
-            req.body.store_id !== "" ? { store_id: req.body.store_id } : undefined,
-            req.body.maquininha_serial !== "" ? { maquininha_serial: req.body.maquininha_serial } : undefined
-          ].filter(Boolean) // Remove condições indefinidas
+            req.body.store_id !== ""
+              ? { store_id: req.body.store_id }
+              : undefined,
+            req.body.maquininha_serial !== ""
+              ? { maquininha_serial: req.body.maquininha_serial }
+              : undefined
+          ].filter(Boolean)
         },
-        { NOT: { id: req.body.id } } // Exclui a máquina atual da verificação
+        { NOT: { id: req.body.id } }
       ]
     };
 
-    // Verifique se já existe uma máquina com o mesmo nome, store_id ou maquininha_serial para este cliente, mas exclua a máquina atual
     const maquinaExistente = await prisma.pix_Maquina.findFirst({
       where: filtroDuplicidade,
       select: {
@@ -2319,38 +2323,55 @@ app.put("/maquina", verifyJwtPessoa, async (req: any, res) => {
       });
     }
 
-    // Se não houver conflitos, atualiza a máquina
-    // Monta o objeto de atualização sem sobrescrever campos não enviados
+    // Dados que serão atualizados
     const dataUpdate1: any = {
-  nome: req.body.nome,
-  descricao: req.body.descricao,
-  valorDoPulso: req.body.valorDoPulso,
-  estoque: req.body.estoque,
-  bonusAtivo: req.body.bonusAtivo,
-  bonusRegras: req.body.bonusRegras,
-  bonusMetodos: req.body.bonusMetodos,
-};
+      nome: req.body.nome,
+      descricao: req.body.descricao,
+      valorDoPulso: req.body.valorDoPulso,
+      estoque: req.body.estoque,
+      bonusAtivo: req.body.bonusAtivo,
+      bonusRegras: req.body.bonusRegras,
+      bonusMetodos: req.body.bonusMetodos,
+    };
 
-if (typeof req.body.bloqueadaMensalidade === "boolean") {
-  dataUpdate1.bloqueadaMensalidade = req.body.bloqueadaMensalidade;
-}
+    // Bloqueio individual por mensalidade
+    if (typeof req.body.bloqueadaMensalidade === "boolean") {
+      dataUpdate1.bloqueadaMensalidade =
+        req.body.bloqueadaMensalidade;
+    }
 
-if (typeof req.body.store_id !== 'undefined') {
-  dataUpdate1.store_id = req.body.store_id === "" ? null : req.body.store_id;
-}
+    // Atualiza store_id somente se vier no body
+    if (typeof req.body.store_id !== "undefined") {
+      dataUpdate1.store_id =
+        req.body.store_id === "" ? null : req.body.store_id;
+    }
 
-if (typeof req.body.maquininha_serial !== 'undefined') {
-  dataUpdate1.maquininha_serial = req.body.maquininha_serial === "" ? null : req.body.maquininha_serial;
-}
+    // Atualiza maquininha_serial somente se vier no body
+    if (typeof req.body.maquininha_serial !== "undefined") {
+      dataUpdate1.maquininha_serial =
+        req.body.maquininha_serial === ""
+          ? null
+          : req.body.maquininha_serial;
+    }
 
-const maquinaAtualizada = await prisma.pix_Maquina.update({
+    const maquinaAtualizada = await prisma.pix_Maquina.update({
+      where: { id: req.body.id },
+      data: dataUpdate1,
+    });
 
-    console.log('Máquina atualizada com sucesso:', maquinaAtualizada);
+    console.log(
+      "Máquina atualizada com sucesso:",
+      maquinaAtualizada
+    );
 
     return res.status(200).json(maquinaAtualizada);
+
   } catch (err: any) {
     console.log(err);
-    return res.status(500).json({ error: `Erro ao atualizar a máquina: ${err.message}` });
+
+    return res.status(500).json({
+      error: `Erro ao atualizar a máquina: ${err.message}`
+    });
   }
 });
 
