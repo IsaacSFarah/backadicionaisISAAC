@@ -557,6 +557,29 @@ const WEBHOOK_CONFIG = {
  * Rota para consulta de créditos da máquina 01
  * Retorna os pulsos formatados e zera o valor após a consulta
  */
+app.get("/admin/criar-coluna-bloqueio-mensalidade", async (req, res) => {
+  try {
+    await prisma.$executeRawUnsafe(`
+      ALTER TABLE "Pix_Maquina"
+      ADD COLUMN IF NOT EXISTS "bloqueadaMensalidade"
+      BOOLEAN NOT NULL DEFAULT false;
+    `);
+
+    return res.status(200).json({
+      sucesso: true,
+      mensagem: "Coluna bloqueadaMensalidade criada com sucesso"
+    });
+  } catch (error) {
+    console.error("Erro ao criar coluna bloqueadaMensalidade:", error);
+
+    return res.status(500).json({
+      sucesso: false,
+      erro: String(error)
+    });
+  }
+});
+
+
 app.get("/consulta-maquina01", async (req, res) => {
   try {
     const resultado = calcularPulsosDinamicos(MAQUINAS.MAQUINA_01.valor, 1.0, null);
