@@ -5534,30 +5534,39 @@ app.post("/decrementar-estoque/:id/", async (req: any, res: any) => {
         }
       });
 
-      console.log(
-  `Saída de ${quantidade} produto(s) registrada para o cliente ${maquina.cliente?.nome} com valor acumulado de R$ ${valorAcumulado.toFixed(2)}`
-);
+          console.log(
+        `Saída de ${quantidade} produto(s) registrada para o cliente ${maquina.cliente?.nome} com valor acumulado de R$ ${valorAcumulado.toFixed(2)}`
+      );
 
-await enviarPushCliente(
-  String(maquina.clienteId),
-  "Saiu Produto 🎁",
-  `${maquina.nome || "Máquina"} liberou ${quantidade} produto(s) • Gerou R$ ${valorAcumulado.toFixed(2).replace(".", ",")}`
-);
+      await enviarPushCliente(
+        String(maquina.clienteId),
+        "Saiu Produto 🎁",
+        `${maquina.nome || "Máquina"} liberou ${quantidade} produto(s) • Gerou R$ ${valorAcumulado.toFixed(2).replace(".", ",")}`
+      );
+    }
 
-}
+    if (NOTIFICACOES_ESTOQUE) {
+      notificarDiscord(
+        DISCORD_WEBHOOKS.ESTOQUE,
+        `Item vendido.`,
+        ` Maquina: ${maquina?.nome}. Maquina: ${maquina?.descricao}. Cliente: ${maquina.cliente?.nome}`
+      );
+    }
 
-if (NOTIFICACOES_ESTOQUE) {
-  notificarDiscord(
-    DISCORD_WEBHOOKS.ESTOQUE,
-    `Item vendido.`,
-    ` Maquina: ${maquina?.nome}. Maquina: ${maquina?.descricao}. Cliente: ${maquina.cliente?.nome}`
-  );
-}
+    console.log("Estoque atualizado");
 
-console.log("Estoque atualizado");
-return res.status(200).json({
-  "Estoque atual": `${novoEstoque}`,
-  "Registro": "Saída de produto registrada no relatório do cliente"
+    return res.status(200).json({
+      "Estoque atual": `${novoEstoque}`,
+      "Registro": "Saída de produto registrada no relatório do cliente"
+    });
+
+  } catch (error) {
+    console.error("Error updating stock:", error);
+
+    return res.status(404).json({
+      "retorno": "Erro ao tentar atualizar estoque"
+    });
+  }
 });
     
 //id da maquina e a quantidade ?valor=1
