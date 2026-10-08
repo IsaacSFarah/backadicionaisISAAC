@@ -435,22 +435,39 @@ async function tentarEnviarCreditoViaWs(machineId: string, options?: {
   }
 
   const maquina = await prisma.pix_Maquina.findUnique({
-    where: { id: machineId },
-    select: {
-      id: true,
-      nome: true,
-      valorDoPix: true,
-      valorDoPulso: true,
-      metodoPagamento: true,
-      bonusAtivo: true,
-      bonusMetodos: true,
-      bonusRegras: true,
-    },
-  });
+  where: { id: machineId },
+  select: {
+    id: true,
+    nome: true,
+    clienteId: true,
+    bloqueadaMensalidade: true,
+    valorDoPix: true,
+    valorDoPulso: true,
+    metodoPagamento: true,
+    bonusAtivo: true,
+    bonusMetodos: true,
+    bonusRegras: true,
+  },
+});
 
   if (!maquina) {
     return { enviado: false, motivo: "MAQUINA_NAO_ENCONTRADA" as const };
   }
+
+  const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
+
+if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
+  console.log(
+    `🚫 Crédito WS bloqueado: ${maquina.nome} (${machineId})`
+  );
+
+  return {
+    enviado: false,
+    motivo: bloqueio.bloqueado
+      ? "CLIENTE_BLOQUEADO" as const
+      : "MAQUINA_BLOQUEADA_MENSALIDADE" as const,
+  };
+}
 
   const calculo = calcularPulsosParaMaquinaWs(maquina);
   if (calculo.pulsosFormatados === "0000") {
