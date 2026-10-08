@@ -3255,6 +3255,14 @@ app.post("/credito-remoto-cliente", verifyJWT, async (req: any, res) => {
     // ==============================
     if (maquina.cliente !== null && maquina.cliente !== undefined) {
 
+      if (maquina.bloqueadaMensalidade === true) {
+  console.log(`🚫 Crédito remoto cliente bloqueado: ${maquina.nome}`);
+
+  return res.status(403).json({
+    retorno: "MAQUINA_BLOQUEADA_MENSALIDADE"
+  });
+}
+
       if (
         maquina.cliente.ativo &&
         !isInadimplente(maquina.cliente.dataVencimento)
@@ -9424,6 +9432,20 @@ app.post("/usar-link/:id", async (req, res) => {
     if (!maquina) {
       return res.status(404).json({ error: "Máquina não encontrada" });
     }
+
+    const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
+
+if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
+  console.log(
+    `🚫 Link bloqueado: ${maquina.nome} (${maquina.id})`
+  );
+
+  return res.status(403).json({
+    error: bloqueio.bloqueado
+      ? "CLIENTE_BLOQUEADO"
+      : "MAQUINA_BLOQUEADA_MENSALIDADE"
+  });
+}
 
     // 🔥 VERIFICAR ANTES DE LIBERAR
     if (maquina.ultimaRequisicao) {
