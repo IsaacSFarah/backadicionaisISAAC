@@ -4755,6 +4755,50 @@ app.post("/rota-recebimento-mercado-pago-dinamica/:id", async (req: any, res: an
     }
 
     // ================================
+// BLOQUEIO INDIVIDUAL POR MENSALIDADE
+// ================================
+if (maquina.bloqueadaMensalidade === true) {
+  console.log(
+    `🚫 Pagamento em máquina bloqueada: ${maquina.nome} (${maquina.id})`
+  );
+
+  const jaEstornado = await prisma.pix_Pagamento.findFirst({
+    where: {
+      mercadoPagoId: paymentId,
+      estornado: true
+    }
+  });
+
+  if (!jaEstornado) {
+    const estorno = await estornarMP(
+      paymentId,
+      tokenCliente,
+      "maquina bloqueada por mensalidade"
+    );
+
+    if (!estorno) {
+      console.log("❌ Falha no estorno da máquina bloqueada");
+      processandoWebhooks.delete(paymentId);
+      return res.status(200).end();
+    }
+
+    await prisma.pix_Pagamento.create({
+      data: {
+        maquinaId: maquina.id,
+        valor: valor.toString(),
+        mercadoPagoId: paymentId,
+        motivoEstorno: "maquina bloqueada",
+        estornado: true,
+        clienteId: cliente.id
+      }
+    });
+  }
+
+  processandoWebhooks.delete(paymentId);
+  return res.status(200).end();
+}
+
+    // ================================
     // 7. MÁQUINA OFFLINE
     // ================================
     let status = "ONLINE";
