@@ -1322,9 +1322,15 @@ async function estornarMP(id: string, token: string, motivoEstorno: string, tama
     numTentativasEstorno++;
 
     if (numTentativasEstorno < MAX_TENTATIVAS) {
-      // Tentar novamente recursivamente
-      return await estornarMP(id, token, motivoEstorno, tamanhoChave);
-    } else {
+  console.log(
+    `⏳ Estorno falhou. Aguardando 2 segundos antes da tentativa ${numTentativasEstorno}...`
+  );
+
+  await new Promise(resolve => setTimeout(resolve, 2000));
+
+  // Tentar novamente recursivamente
+  return await estornarMP(id, token, motivoEstorno, tamanhoChave);
+} else {
       console.error(
         `Estorno não concluído | pagamento: ${id} | motivo: ${motivoEstorno} | status: ${status ?? "sem status"} | erro: ${motivoErro}`
       );
