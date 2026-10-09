@@ -178,6 +178,33 @@ async function getBloqueioCliente(clienteId: string) {
   return { bloqueado: false, motivo: "", cliente };
 }
 
+// =====================================
+// IKPAY - CÁLCULO DA MENSALIDADE
+// =====================================
+async function calcularMensalidadeCliente(clienteId: string) {
+
+  const quantidadeMaquinas = await prisma.pix_Maquina.count({
+  where: {
+    clienteId: clienteId,
+    bloqueadaMensalidade: false
+  }
+});
+
+  const valorPorMaquina = quantidadeMaquinas >= 5 ? 29.90 : 35.00;
+
+  const valorTotal = Number(
+    (quantidadeMaquinas * valorPorMaquina).toFixed(2)
+  );
+
+  return {
+    clienteId,
+    quantidadeMaquinas,
+    valorPorMaquina,
+    valorTotal,
+    diaVencimento: 15
+  };
+}
+
 
 // Variáveis auxiliares (evitam erros de nomes não declarados)
 let ultimoAcessoMaquina01: Date | null = null;
