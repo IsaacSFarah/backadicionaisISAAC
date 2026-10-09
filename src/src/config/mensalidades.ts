@@ -37,6 +37,30 @@ async function executarMensalidades() {
   console.log("✅ Rotina de mensalidades executada");
 }
 
+// =====================================
+// IKPAY - LIMPAR COBRANÇAS ANTIGAS
+// =====================================
+async function limparMensalidadesAnteriores(
+  clienteId: string,
+  vencimentoAtual: Date
+) {
+  const resultado = await prisma.pix_PagamentoCliente.deleteMany({
+    where: {
+      clienteId,
+      dataDeVencimento: {
+        lt: vencimentoAtual
+      },
+      status: {
+        in: ["ABERTO", "VENCIDO"]
+      }
+    }
+  });
+
+  console.log(
+    `🧹 Mensalidades anteriores substituídas: ${resultado.count}`
+  );
+}
+
 executarMensalidades()
   .catch((erro) => {
     console.error("❌ Erro na rotina de mensalidades:", erro);
