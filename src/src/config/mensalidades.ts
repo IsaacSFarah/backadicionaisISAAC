@@ -293,27 +293,195 @@ async function gerarMensalidadeDoMes(
 // =====================================
 // ARQUIVAR MENSALIDADES ANTIGAS
 // =====================================
-async function limparMensalidadesAnteriores(
+async function gerarMensalidadeDoMes(
   clienteId: string,
-  vencimentoAtual: Date
+  ano: number,
+  mes: number
 ) {
-  const resultado = await prisma.pix_PagamentoCliente.updateMany({
-    where: {
-      clienteId,
-      dataDeVencimento: {
-        lt: vencimentoAtual,
-      },
-      status: {
-        in: ["ABERTO", "VENCIDO"],
-      },
-    },
-    data: {
-      status: "SUBSTITUIDO",
-    },
-  });
+  const competencia = competenciaMensalidade(ano, mes);
 
-  console.log(
-    `📁 Mensalidades antigas substituídas: ${resultado.count}`
+  const vencimento = new Date(
+    Date.UTC(ano, mes - 1, 15, 12, 0, 0)
+  );
+
+  return prisma.$transaction(
+    async (tx) => {
+      // Bloqueia operações simultâneas do mesmo cliente.
+      await tx.$queryRaw`
+        SELECT "id"
+        FROM "Pix_Cliente"
+        WHERE "id" = ${clienteId}
+        FOR UPDATE
+      `;
+
+      const cliente = await tx.pix_Cliente.findUnique({
+        where: { id: clienteId },
+        select: { ativo: true },
+      });
+
+      if (!cliente?.ativo) {
+        return {
+          gerada: false,
+          motivo: "CLIENTE_INATIVO",
+        };
+      }
+
+      const dataCorte = new Date(
+        Date.UTC(ano, mes - 1, 13, 12, 0, 0)
+      );
+
+      const quantidadeMaquinas = await tx.pix_Maquina.count({
+        where: {
+          clienteId,
+          bloqueadaMensalidade: false,
+          dataInclusao: {
+            lte: dataCorte,
+          },
+        },
+      });
+
+      const valorPorMaquinaCentavos =
+        quantidadeMaquinas >= 5 ? 2990 : 3500;
+
+      const totalMaquinasCentavos =
+        quantidadeMaquinas * valorPorMaquinaCentavos;
+
+      // Busca parcelas do mês e atrasadas ainda pendentes.
+      // Não inclui parcelas de mensalidades já pagas.
+      const parcelas = await tx.pix_ParcelaExtra.findMany({
+        where: {
+          competencia: {
+            lte: competencia,
+          },
+          dataPagamento: null,
+          cobrancaExtra: {
+            clienteId,
+            cancelada: false,
+          },
+          OR: [
+            {
+              mensalidadeId: null,
+            },
+            {
+              mensalidade: {
+                status: {
+                  in: ["ABERTO", "VENCIDO", "SUBSTITUIDO"],
+                },
+              },
+            },
+          ],
+        },
+        select: {
+          id: true,
+          valorCentavos: true,
+          mensalidadeId: true,
+          competencia: true,
+        },
+      });
+
+      const totalExtrasCentavos = parcelas.reduce(
+        (total, parcela) => total + parcela.valorCentavos,
+        0
+      );
+
+      const totalCentavos =
+        totalMaquinasCentavos + totalExtrasCentavos;
+
+      const existente = await tx.pix_PagamentoCliente.findUnique({
+        where: {
+          clienteId_dataDeVencimento: {
+            clienteId,
+            dataDeVencimento: vencimento,
+          },
+        },
+        select: {
+          id: true,
+          status: true,
+          valor: true,
+        },
+      });
+
+      // Nunca altera uma mensalidade já finalizada.
+      if (
+        existente &&
+        !["ABERTO", "VENCIDO"].includes(existente.status)
+      ) {
+        return {
+          gerada: true,
+          cobranca: existente,
+        };
+      }
+
+      if (totalCentavos === 0) {
+        return {
+          gerada: false,
+          motivo: "SEM_COBRANCA",
+        };
+      }
+
+      const cobranca = await tx.pix_PagamentoCliente.upsert({
+        where: {
+          clienteId_dataDeVencimento: {
+            clienteId,
+            dataDeVencimento: vencimento,
+          },
+        },
+        create: {
+          clienteId,
+          dataDeVencimento: vencimento,
+          valor: centavosParaReais(totalCentavos),
+          status: "ABERTO",
+          diaPagamento: 15,
+          avisosEnviados: [],
+        },
+        update: {
+          valor: centavosParaReais(totalCentavos),
+        },
+      });
+
+      // Transfere o vínculo das parcelas pendentes.
+      if (parcelas.length > 0) {
+        await tx.pix_ParcelaExtra.updateMany({
+          where: {
+            id: {
+              in: parcelas.map((parcela) => parcela.id),
+            },
+            dataPagamento: null,
+          },
+          data: {
+            mensalidadeId: cobranca.id,
+          },
+        });
+      }
+
+      // Substitui mensalidades anteriores somente após
+      // transferir suas parcelas extras pendentes.
+      await tx.pix_PagamentoCliente.updateMany({
+        where: {
+          clienteId,
+          id: {
+            not: cobranca.id,
+          },
+          dataDeVencimento: {
+            lt: vencimento,
+          },
+          status: {
+            in: ["ABERTO", "VENCIDO"],
+          },
+        },
+        data: {
+          status: "SUBSTITUIDO",
+        },
+      });
+
+      return {
+        gerada: true,
+        cobranca,
+      };
+    },
+    {
+      timeout: 15000,
+    }
   );
 }
 
@@ -568,9 +736,7 @@ async function executarMensalidades() {
         continue;
       }
 
-      const vencimentoAtual = new Date(
-        Date.UTC(ano, mes - 1, 15, 12, 0, 0)
-      );
+      
 
       await limparMensalidadesAnteriores(
         cliente.id,
