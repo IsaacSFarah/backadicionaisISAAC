@@ -9719,6 +9719,73 @@ async function verificarAdministradorAtivo(
 }
 
 // =====================================
+// IKPAY - CONFIRMAR PAGAMENTO MENSALIDADE
+// =====================================
+async function confirmarPagamentoMensalidade(req: any, res: any) {
+  try {
+    const { id } = req.params;
+
+    if (!id || typeof id !== "string") {
+      return res.status(400).json({
+        erro: "ID da mensalidade inválido",
+      });
+    }
+
+    const resultado = await prisma.pix_PagamentoCliente.updateMany({
+      where: {
+        id,
+        status: {
+          in: ["ABERTO", "VENCIDO"],
+        },
+      },
+      data: {
+        status: "PAGO",
+        dataDoPagamento: new Date(),
+      },
+    });
+
+    if (resultado.count === 0) {
+      const mensalidade = await prisma.pix_PagamentoCliente.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          status: true,
+        },
+      });
+
+      if (!mensalidade) {
+        return res.status(404).json({
+          erro: "Mensalidade não encontrada",
+        });
+      }
+
+      if (mensalidade.status === "PAGO") {
+        return res.status(200).json({
+          sucesso: true,
+          mensagem: "Mensalidade já estava paga",
+        });
+      }
+
+      return res.status(409).json({
+        erro: "Esta mensalidade não pode ser confirmada",
+        status: mensalidade.status,
+      });
+    }
+
+    return res.json({
+      sucesso: true,
+      mensagem: "Pagamento confirmado com sucesso",
+    });
+  } catch (erro) {
+    console.error("Erro ao confirmar mensalidade:", erro);
+
+    return res.status(500).json({
+      erro: "Erro interno ao confirmar pagamento",
+    });
+  }
+}
+
+// =====================================
 // IKPAY - ROTAS ADMINISTRATIVAS
 // =====================================
 app.get(
