@@ -208,29 +208,7 @@ async function calcularMensalidadeCliente(clienteId: string) {
 // =====================================
 // IKPAY - CONSULTAR MENSALIDADE
 // =====================================
-app.get("/mensalidade/:clienteId", verifyJWT, async (req: any, res) => {
-  try {
-    const { clienteId } = req.params;
 
-    // Impede consultar a mensalidade de outro cliente
-    if (String(req.userId) !== String(clienteId)) {
-      return res.status(403).json({
-        erro: "ACESSO_NEGADO"
-      });
-    }
-
-    const mensalidade = await calcularMensalidadeCliente(clienteId);
-
-    return res.status(200).json(mensalidade);
-
-  } catch (error) {
-    console.error("Erro ao consultar mensalidade:", error);
-
-    return res.status(500).json({
-      erro: "ERRO_CONSULTAR_MENSALIDADE"
-    });
-  }
-});
 
 
 // Variáveis auxiliares (evitam erros de nomes não declarados)
@@ -2797,6 +2775,29 @@ app.get("/consultar-maquina/:id", async (req: any, res) => {
 //     return res.status(500).json({ "retorno": "0000" });
 //   }
 // });
+app.get("/mensalidade/:clienteId", verifyJWT, async (req: any, res) => {
+  try {
+    const { clienteId } = req.params;
+
+    // Impede consultar a mensalidade de outro cliente
+    if (String(req.userId) !== String(clienteId)) {
+      return res.status(403).json({
+        erro: "ACESSO_NEGADO"
+      });
+    }
+
+    const mensalidade = await calcularMensalidadeCliente(clienteId);
+
+    return res.status(200).json(mensalidade);
+
+  } catch (error) {
+    console.error("Erro ao consultar mensalidade:", error);
+
+    return res.status(500).json({
+      erro: "ERRO_CONSULTAR_MENSALIDADE"
+    });
+  }
+});
 
 app.get("/consultar-maquina/:id", async (req: any, res: any) => {
   try {
