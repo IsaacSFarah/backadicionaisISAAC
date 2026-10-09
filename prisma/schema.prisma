@@ -200,6 +200,7 @@ enum StatusPgto {
   ABERTO
   VENCIDO
   PAGO
+  SUBSTITUIDO
 }
 
 model Pix_FcmToken {
