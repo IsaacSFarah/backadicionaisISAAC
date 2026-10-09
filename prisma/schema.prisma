@@ -162,6 +162,7 @@ model Pix_PagamentoCliente {
   clienteId        String
   Pix_Cliente      Pix_Cliente @relation(fields: [clienteId], references: [id])
 
+  @@unique([clienteId, dataDeVencimento])
   @@map("pagamento-cliente")
 }
 
