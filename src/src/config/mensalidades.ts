@@ -1,19 +1,69 @@
+
 import { PrismaClient } from "@prisma/client";
 import * as admin from "firebase-admin";
 
 const prisma = new PrismaClient();
 
+const CHAVE_PIX = "ikpaysistema@gmail.com";
+const WHATSAPP = "47 8486-1290";
+
 // =====================================
-// IKPAY - CALCULAR MENSALIDADE
+// FIREBASE
 // =====================================
-async function calcularMensalidade(clienteId: string) {
+const firebaseServiceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+
+if (firebaseServiceAccountJson && !admin.apps.length) {
+  try {
+    admin.initializeApp({
+      credential: admin.credential.cert(
+        JSON.parse(firebaseServiceAccountJson)
+      ),
+    });
+
+    console.log("🔥 Firebase mensalidades inicializado");
+  } catch (erro) {
+    console.error("❌ Erro ao inicializar Firebase:", erro);
+  }
+}
+
+// =====================================
+// DATA E HORA DE BRASÍLIA
+// =====================================
+function obterDataBrasilia() {
+  const partes = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    hourCycle: "h23",
+  }).formatToParts(new Date());
+
+  const obter = (tipo: string) =>
+    Number(partes.find((p) => p.type === tipo)?.value);
+
+  return {
+    ano: obter("year"),
+    mes: obter("month"),
+    dia: obter("day"),
+    hora: obter("hour"),
+  };
+}
+
+// =====================================
+// CÁLCULO DA MENSALIDADE
+// =====================================
+async function calcularMensalidade(
+  clienteId: string,
+  ano: number,
+  mes: number
+) {
   const cliente = await prisma.pix_Cliente.findUnique({
     where: { id: clienteId },
     select: { ativo: true },
   });
 
-  // Cliente inexistente ou inativo não recebe cobrança
-  if (!cliente || cliente.ativo === false) {
+  if (!cliente?.ativo) {
     return {
       quantidadeMaquinas: 0,
       valorPorMaquina: 0,
@@ -21,14 +71,23 @@ async function calcularMensalidade(clienteId: string) {
     };
   }
 
+  // Fechamento: dia 13 às 9h de Brasília.
+  const dataCorte = new Date(
+    Date.UTC(ano, mes - 1, 13, 12, 0, 0)
+  );
+
   const quantidadeMaquinas = await prisma.pix_Maquina.count({
     where: {
       clienteId,
       bloqueadaMensalidade: false,
+      dataInclusao: {
+        lte: dataCorte,
+      },
     },
   });
 
-  const valorPorMaquina = quantidadeMaquinas >= 5 ? 29.90 : 35.00;
+  const valorPorMaquina =
+    quantidadeMaquinas >= 5 ? 29.9 : 35;
 
   const valorTotal = Number(
     (quantidadeMaquinas * valorPorMaquina).toFixed(2)
@@ -42,20 +101,30 @@ async function calcularMensalidade(clienteId: string) {
 }
 
 // =====================================
-// IKPAY - GERAR MENSALIDADE DO MÊS
+// GERAR MENSALIDADE DO MÊS
 // =====================================
 async function gerarMensalidadeDoMes(
   clienteId: string,
   ano: number,
   mes: number
 ) {
-  const mensalidade = await calcularMensalidade(clienteId);
+  const mensalidade = await calcularMensalidade(
+    clienteId,
+    ano,
+    mes
+  );
 
   if (mensalidade.quantidadeMaquinas === 0) {
-    return { gerada: false, motivo: "SEM_COBRANCA" };
+    console.log(
+      `⏭️ Cliente ${clienteId}: sem máquinas elegíveis`
+    );
+
+    return {
+      gerada: false,
+      motivo: "SEM_COBRANCA",
+    };
   }
 
-  // Dia 15, às 9h de Brasília
   const vencimento = new Date(
     Date.UTC(ano, mes - 1, 15, 12, 0, 0)
   );
@@ -85,7 +154,34 @@ async function gerarMensalidadeDoMes(
 }
 
 // =====================================
-// IKPAY - ENVIAR PUSH DE MENSALIDADE
+// ARQUIVAR MENSALIDADES ANTIGAS
+// =====================================
+async function limparMensalidadesAnteriores(
+  clienteId: string,
+  vencimentoAtual: Date
+) {
+  const resultado = await prisma.pix_PagamentoCliente.updateMany({
+    where: {
+      clienteId,
+      dataDeVencimento: {
+        lt: vencimentoAtual,
+      },
+      status: {
+        in: ["ABERTO", "VENCIDO"],
+      },
+    },
+    data: {
+      status: "SUBSTITUIDO",
+    },
+  });
+
+  console.log(
+    `📁 Mensalidades antigas substituídas: ${resultado.count}`
+  );
+}
+
+// =====================================
+// ENVIAR PUSH FCM
 // =====================================
 async function enviarPushMensalidade(
   clienteId: string,
@@ -129,11 +225,11 @@ async function enviarPushMensalidade(
         erro?.code || erro?.message || erro
       );
 
-      const codigo = erro?.code;
-
       if (
-        codigo === "messaging/registration-token-not-registered" ||
-        codigo === "messaging/invalid-registration-token"
+        erro?.code ===
+          "messaging/registration-token-not-registered" ||
+        erro?.code ===
+          "messaging/invalid-registration-token"
       ) {
         await prisma.pix_FcmToken.deleteMany({
           where: { token: item.token },
@@ -146,7 +242,7 @@ async function enviarPushMensalidade(
 }
 
 // =====================================
-// IKPAY - AVISOS DE MENSALIDADE
+// AVISOS DE MENSALIDADE
 // =====================================
 async function avisarMensalidadeCliente(
   clienteId: string,
@@ -158,11 +254,6 @@ async function avisarMensalidadeCliente(
     return;
   }
 
-  const vencimento = new Date(
-    Date.UTC(ano, mes - 1, 15, 12, 0, 0)
-  );
-
-  // Cliente inativo não recebe cobrança nem aviso.
   const cliente = await prisma.pix_Cliente.findUnique({
     where: { id: clienteId },
     select: { ativo: true },
@@ -171,6 +262,10 @@ async function avisarMensalidadeCliente(
   if (!cliente?.ativo) {
     return;
   }
+
+  const vencimento = new Date(
+    Date.UTC(ano, mes - 1, 15, 12, 0, 0)
+  );
 
   const cobranca = await prisma.pix_PagamentoCliente.findUnique({
     where: {
@@ -181,19 +276,20 @@ async function avisarMensalidadeCliente(
     },
   });
 
-  // Nunca avisar uma mensalidade paga ou inexistente.
-  if (!cobranca || cobranca.status === "PAGO") {
+  if (
+    !cobranca ||
+    !["ABERTO", "VENCIDO"].includes(cobranca.status)
+  ) {
     return;
   }
 
-  // Não repetir aviso já registrado para o mesmo dia.
   const avisos = Array.isArray(cobranca.avisosEnviados)
     ? cobranca.avisosEnviados
     : [];
 
   if (avisos.includes(dia)) {
     console.log(
-      `⏭️ Aviso do dia ${dia} já enviado: ${clienteId}`
+      `⏭️ Aviso do dia ${dia} já registrado: ${clienteId}`
     );
     return;
   }
@@ -206,225 +302,174 @@ async function avisarMensalidadeCliente(
   let mensagem = "";
 
   if (dia === 13) {
-    mensagem = `Sua mensalidade de R$ ${valorFormatado} vence dia 15. PIX: ikpaysistema@gmail.com`;
+    mensagem =
+      `Sua mensalidade de R$ ${valorFormatado} ` +
+      `vence dia 15. PIX: ${CHAVE_PIX}`;
   } else if (dia === 14) {
-    mensagem = `Sua mensalidade IKPAY de R$ ${valorFormatado} vence amanhã. PIX: ikpaysistema@gmail.com`;
+    mensagem =
+      `Sua mensalidade de R$ ${valorFormatado} ` +
+      `vence amanhã. PIX: ${CHAVE_PIX}`;
   } else if (dia === 15) {
     titulo = "IKPAY | Vencimento hoje";
-    mensagem = `Sua mensalidade de R$ ${valorFormatado} vence hoje. PIX: ikpaysistema@gmail.com`;
+    mensagem =
+      `Sua mensalidade de R$ ${valorFormatado} ` +
+      `vence hoje. PIX: ${CHAVE_PIX}`;
   } else {
     titulo = "IKPAY | Mensalidade pendente";
-    mensagem = `Sua mensalidade de R$ ${valorFormatado} venceu ontem. Se já pagou, envie o comprovante pelo WhatsApp: 47 8486-1290`;
+    mensagem =
+      `Sua mensalidade de R$ ${valorFormatado} ` +
+      `venceu ontem. Envie o comprovante pelo ` +
+      `WhatsApp: ${WHATSAPP}`;
   }
 
-  // Reserva o aviso no banco antes do envio.
-// A atualização condicional impede que outra execução
-// reserve o mesmo aviso simultaneamente.
-const reserva = await prisma.$executeRaw`
-  UPDATE "pagamento-cliente"
-  SET "avisosEnviados" =
-    "avisosEnviados" || ${JSON.stringify([dia])}::jsonb
-  WHERE "id" = ${cobranca.id}
-    AND "status"::text IN ('ABERTO', 'VENCIDO')
-    AND NOT (
-      "avisosEnviados" @> ${JSON.stringify([dia])}::jsonb
+  // Reserva atômica para evitar que duas execuções
+  // enviem o mesmo aviso simultaneamente.
+  const reserva = await prisma.$executeRaw`
+    UPDATE "pagamento-cliente"
+    SET "avisosEnviados" =
+      "avisosEnviados" || ${JSON.stringify([dia])}::jsonb
+    WHERE "id" = ${cobranca.id}
+      AND "status"::text IN ('ABERTO', 'VENCIDO')
+      AND NOT (
+        "avisosEnviados" @> ${JSON.stringify([dia])}::jsonb
+      )
+  `;
+
+  if (reserva === 0) {
+    console.log(
+      `⏭️ Aviso já reservado: ${clienteId}, dia ${dia}`
+    );
+    return;
+  }
+
+  try {
+    const enviado = await enviarPushMensalidade(
+      clienteId,
+      titulo,
+      mensagem
+    );
+
+    if (!enviado) {
+      await liberarReservaAviso(cobranca.id, dia);
+      return;
+    }
+
+    console.log(
+      `🔔 Aviso do dia ${dia} enviado: ${clienteId}`
+    );
+  } catch (erro) {
+    await liberarReservaAviso(cobranca.id, dia);
+    throw erro;
+  }
+}
+
+// =====================================
+// LIBERAR RESERVA SE FCM FALHAR
+// =====================================
+async function liberarReservaAviso(
+  cobrancaId: string,
+  dia: number
+) {
+  await prisma.$executeRaw`
+    UPDATE "pagamento-cliente"
+    SET "avisosEnviados" = COALESCE(
+      (
+        SELECT jsonb_agg(elemento)
+        FROM jsonb_array_elements("avisosEnviados") AS elemento
+        WHERE elemento <> ${JSON.stringify(dia)}::jsonb
+      ),
+      '[]'::jsonb
     )
-`;
-if (reserva === 0) {
-  console.log(`⏭️ Aviso já reservado: ${clienteId}, dia ${dia}`);
-  return;
+    WHERE "id" = ${cobrancaId}
+  `;
 }
 
-try {
-  const enviado = await enviarPushMensalidade(
-    clienteId,
-    titulo,
-    mensagem
-  );
-
-  await prisma.$executeRaw`
-  UPDATE "pagamento-cliente"
-  SET "avisosEnviados" = COALESCE(
-    (
-      SELECT jsonb_agg(elemento)
-      FROM jsonb_array_elements("avisosEnviados") AS elemento
-      WHERE elemento <> ${JSON.stringify(dia)}::jsonb
-    ),
-    '[]'::jsonb
-  )
-  WHERE "id" = ${cobranca.id}
-`;
-    return;
-  }
-
-  console.log(`🔔 Aviso do dia ${dia} enviado: ${clienteId}`);
-} catch (erro) {
-  // Libera a reserva caso ocorra uma falha.
-  await prisma.$executeRaw`
-  UPDATE "pagamento-cliente"
-  SET "avisosEnviados" = COALESCE(
-    (
-      SELECT jsonb_agg(elemento)
-      FROM jsonb_array_elements("avisosEnviados") AS elemento
-      WHERE elemento <> ${JSON.stringify(dia)}::jsonb
-    ),
-    '[]'::jsonb
-  )
-  WHERE "id" = ${cobranca.id}
-`;
-
-  throw erro;
-}
-
-  // Só registra aviso se o Firebase aceitou o envio.
-  if (!enviado) {
-    return;
-  }
-
-  await prisma.pix_PagamentoCliente.updateMany({
-    where: {
-      id: cobranca.id,
-      status: { not: "PAGO" },
-    },
-    data: {
-      avisosEnviados: [...avisos, dia],
-    },
-  });
+// =====================================
+// ROTINA PRINCIPAL
+// =====================================
+async function executarMensalidades() {
+  const { ano, mes, dia, hora } = obterDataBrasilia();
 
   console.log(
-    `🔔 Aviso do dia ${dia} enviado: ${clienteId}`
+    `📅 IKPAY mensalidades: ${dia}/${mes}/${ano}, ${hora}h`
   );
-}
 
-async function executarMensalidades() {
-  const agora = new Date();
-
-  const partes = new Intl.DateTimeFormat("en-US", {
-    timeZone: "America/Sao_Paulo",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    hourCycle: "h23",
-  }).formatToParts(agora);
-
-  const obter = (tipo: string) =>
-    Number(partes.find((p) => p.type === tipo)?.value);
-
-  const dia = obter("day");
-  const mes = obter("month");
-  const ano = obter("year");
-  const hora = obter("hour");
-
-  console.log(`📅 IKPAY mensalidades: ${dia}/${mes}/${ano}, ${hora}h`);
-
-  // Segurança: somente executa após 9h de Brasília
   if (hora < 9) {
     console.log("⏳ Aguardando horário das mensalidades");
     return;
   }
 
- // =====================================
-// IKPAY - GERAR COBRANÇAS DO MÊS
-// =====================================
-
-// Gera as cobranças a partir do dia 13.
-// Não executa novamente nos dias anteriores.
-if (dia < 13) {
-  console.log("⏳ Aguardando dia 13 para gerar mensalidades");
-  return;
-}
-
-const clientes = await prisma.pix_Cliente.findMany({
-  where: {
-    ativo: true,
-  },
-  select: {
-    id: true,
-    nome: true,
-  },
-});
-
-for (const cliente of clientes) {
-  try {
-    const resultado = await gerarMensalidadeDoMes(
-      cliente.id,
-      ano,
-      mes
-    );
-
-    if (!resultado.gerada) {
-      console.log(`⏭️ Sem cobrança: ${cliente.nome}`);
-      continue;
-    }
-
-    // =====================================
-// IKPAY - PROTEÇÃO DO HISTÓRICO
-// =====================================
-
-// A mensalidade atual já foi registrada.
-//
-// Por segurança, não apagamos cobranças
-// anteriores nesta etapa.
-//
-// A regra de não acumular mensalidades
-// será implementada preservando o
-// histórico financeiro.
-
-    console.log(`✅ Mensalidade registrada: ${cliente.nome}`);
-
-// =====================================
-// IKPAY - AVISOS AUTOMÁTICOS
-// =====================================
-if ([13, 14, 15, 16].includes(dia)) {
-  await avisarMensalidadeCliente(
-    cliente.id,
-    ano,
-    mes,
-    dia
-  );
-}
-  } catch (erro) {
-    console.error(
-      `❌ Erro ao gerar mensalidade do cliente ${cliente.id}:`,
-      erro
-    );
+  if (dia < 13 || dia > 16) {
+    console.log("⏳ Fora da janela de mensalidades");
+    return;
   }
-}
 
-console.log("✅ Processamento de mensalidades concluído");
-
-
-// =====================================
-// IKPAY - SUBSTITUIR MENSALIDADES ANTIGAS
-// =====================================
-async function limparMensalidadesAnteriores(
-  clienteId: string,
-  vencimentoAtual: Date
-) {
-  const resultado = await prisma.pix_PagamentoCliente.updateMany({
+  const clientes = await prisma.pix_Cliente.findMany({
     where: {
-      clienteId,
-      dataDeVencimento: {
-        lt: vencimentoAtual,
-      },
-      status: {
-        in: ["ABERTO", "VENCIDO"],
-      },
+      ativo: true,
     },
-    data: {
-      status: "SUBSTITUIDO",
+    select: {
+      id: true,
+      nome: true,
     },
   });
 
   console.log(
-    `📁 Mensalidades antigas arquivadas: ${resultado.count}`
+    `👥 Clientes ativos encontrados: ${clientes.length}`
   );
+
+  for (const cliente of clientes) {
+    try {
+      const resultado = await gerarMensalidadeDoMes(
+        cliente.id,
+        ano,
+        mes
+      );
+
+      if (!resultado.gerada) {
+        console.log(`⏭️ Sem cobrança: ${cliente.nome}`);
+        continue;
+      }
+
+      const vencimentoAtual = new Date(
+        Date.UTC(ano, mes - 1, 15, 12, 0, 0)
+      );
+
+      await limparMensalidadesAnteriores(
+        cliente.id,
+        vencimentoAtual
+      );
+
+      console.log(
+        `✅ Mensalidade registrada: ${cliente.nome}`
+      );
+
+      await avisarMensalidadeCliente(
+        cliente.id,
+        ano,
+        mes,
+        dia
+      );
+    } catch (erro) {
+      console.error(
+        `❌ Erro cliente ${cliente.id}:`,
+        erro
+      );
+    }
+  }
+
+  console.log("✅ Processamento de mensalidades concluído");
 }
 
+// =====================================
+// EXECUÇÃO
+// =====================================
 executarMensalidades()
   .catch((erro) => {
-    console.error("❌ Erro na rotina de mensalidades:", erro);
+    console.error(
+      "❌ Erro na rotina de mensalidades:",
+      erro
+    );
     process.exitCode = 1;
   })
   .finally(async () => {
