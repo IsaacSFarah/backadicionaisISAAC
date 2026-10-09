@@ -160,6 +160,7 @@ model Pix_PagamentoCliente {
   dataDoPagamento  DateTime?
   diaPagamento     Int
   clienteId        String
+  avisosEnviados   Json      @default("[]")
   Pix_Cliente      Pix_Cliente @relation(fields: [clienteId], references: [id])
 
   @@unique([clienteId, dataDeVencimento])
