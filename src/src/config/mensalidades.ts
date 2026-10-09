@@ -394,27 +394,31 @@ if ([13, 14, 15, 16].includes(dia)) {
 
 console.log("✅ Processamento de mensalidades concluído");
 
+
 // =====================================
-// IKPAY - LIMPAR COBRANÇAS ANTIGAS
+// IKPAY - SUBSTITUIR MENSALIDADES ANTIGAS
 // =====================================
 async function limparMensalidadesAnteriores(
   clienteId: string,
   vencimentoAtual: Date
 ) {
-  const resultado = await prisma.pix_PagamentoCliente.deleteMany({
+  const resultado = await prisma.pix_PagamentoCliente.updateMany({
     where: {
       clienteId,
       dataDeVencimento: {
-        lt: vencimentoAtual
+        lt: vencimentoAtual,
       },
       status: {
-        in: ["ABERTO", "VENCIDO"]
-      }
-    }
+        in: ["ABERTO", "VENCIDO"],
+      },
+    },
+    data: {
+      status: "SUBSTITUIDO",
+    },
   });
 
   console.log(
-    `🧹 Mensalidades anteriores substituídas: ${resultado.count}`
+    `📁 Mensalidades antigas arquivadas: ${resultado.count}`
   );
 }
 
