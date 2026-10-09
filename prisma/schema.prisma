@@ -74,6 +74,7 @@ model Pix_Cliente {
   Cobranca             Pix_Cobranca[]
   funcionario          Funcionario[]
   PagamentoCliente     Pix_PagamentoCliente[]
+  CobrancasExtras      Pix_CobrancaExtra[]
   FcmToken             Pix_FcmToken[]
 }
 
@@ -160,8 +161,10 @@ model Pix_PagamentoCliente {
   dataDoPagamento  DateTime?
   diaPagamento     Int
   clienteId        String
-  avisosEnviados   Json      @default("[]")
+  avisosEnviados   Json        @default("[]")
+
   Pix_Cliente      Pix_Cliente @relation(fields: [clienteId], references: [id])
+  parcelasExtras   Pix_ParcelaExtra[]
 
   @@unique([clienteId, dataDeVencimento])
   @@map("pagamento-cliente")
@@ -212,4 +215,46 @@ model Pix_FcmToken {
   cliente   Pix_Cliente @relation(fields: [clienteId], references: [id], onDelete: Cascade)
 
   @@index([clienteId])
+}
+
+model Pix_CobrancaExtra {
+  id                 String   @id @default(uuid())
+  clienteId          String
+  descricao          String
+  observacao         String?
+  valorTotalCentavos Int
+  quantidadeParcelas Int
+  dataCriacao        DateTime @default(now())
+  cancelada          Boolean  @default(false)
+
+  cliente            Pix_Cliente @relation(fields: [clienteId], references: [id])
+  parcelas           Pix_ParcelaExtra[]
+
+  @@index([clienteId])
+  @@map("cobrancas-extras")
+}
+
+model Pix_ParcelaExtra {
+  id                 String    @id @default(uuid())
+  cobrancaExtraId    String
+  mensalidadeId      String?
+  numeroParcela      Int
+  valorCentavos      Int
+  competencia        String
+  dataPagamento      DateTime?
+
+  cobrancaExtra      Pix_CobrancaExtra @relation(
+    fields: [cobrancaExtraId],
+    references: [id]
+  )
+
+  mensalidade        Pix_PagamentoCliente? @relation(
+    fields: [mensalidadeId],
+    references: [id]
+  )
+
+  @@unique([cobrancaExtraId, numeroParcela])
+  @@index([competencia])
+  @@index([mensalidadeId])
+  @@map("parcelas-extras")
 }
