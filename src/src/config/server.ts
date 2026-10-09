@@ -9645,6 +9645,107 @@ app.get("/link/:id", async (req, res) => {
   }
 });
 
+// =====================================
+// IKPAY - LISTAR MENSALIDADES
+// =====================================
+
+// Também deve ser usado somente em rota
+// protegida por autorização administrativa.
+async function listarMensalidadesAdmin(
+  req: any,
+  res: any
+) {
+  try {
+    const mensalidades =
+      await prisma.pix_PagamentoCliente.findMany({
+        orderBy: {
+          dataDeVencimento: "desc",
+        },
+        select: {
+          id: true,
+          clienteId: true,
+          valor: true,
+          status: true,
+          dataDeVencimento: true,
+          dataDoPagamento: true,
+          Pix_Cliente: {
+            select: {
+              nome: true,
+              ativo: true,
+            },
+          },
+        },
+      });
+
+    return res.json({
+      sucesso: true,
+      mensalidades,
+    });
+  } catch (erro) {
+    console.error("Erro ao listar mensalidades:", erro);
+
+    return res.status(500).json({
+      erro: "Erro ao consultar mensalidades",
+    });
+  }
+}
+
+async function verificarAdministradorAtivo(
+  req: any,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const administrador = await prisma.pix_Pessoa.findUnique({
+      where: { id: req.userId },
+      select: { id: true },
+    });
+
+    if (!administrador) {
+      res.status(403).json({
+        erro: "Acesso exclusivo do administrador",
+      });
+      return;
+    }
+
+    next();
+  } catch (erro) {
+    console.error("Erro ao verificar administrador:", erro);
+
+    res.status(500).json({
+      erro: "Erro ao validar acesso administrativo",
+    });
+  }
+}
+
+// =====================================
+// IKPAY - ROTAS ADMINISTRATIVAS
+// =====================================
+app.get(
+  "/admin/mensalidades",
+  verifyJwtPessoa,
+  verificarAdministradorAtivo,
+  listarMensalidadesAdmin
+);
+
+app.patch(
+  "/admin/mensalidades/:id/confirmar-pagamento",
+  verifyJwtPessoa,
+  verificarAdministradorAtivo,
+  confirmarPagamentoMensalidade
+);
+
+
+
+
+//git add . 
+
+//git commit -m "msg"
+
+//git push 
+
+// Aplicação já está ouvindo acima; evite múltiplos app.listen.
+
 
 
 //git add . 
