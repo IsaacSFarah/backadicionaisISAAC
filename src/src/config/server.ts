@@ -120,24 +120,7 @@ const PAGAMENTO_PENDENTE_TIMEOUT_SEGUNDOS = 40;
 // Configuração do Prisma
 const prisma = new PrismaClient();
 
-// =====================================
-// IKPAY - FIREBASE DO SCHEDULER
-// =====================================
-const firebaseServiceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT;
 
-if (firebaseServiceAccountJson && !admin.apps.length) {
-  try {
-    const firebaseServiceAccount = JSON.parse(firebaseServiceAccountJson);
-
-    admin.initializeApp({
-      credential: admin.credential.cert(firebaseServiceAccount),
-    });
-
-    console.log("🔥 Firebase mensalidades inicializado");
-  } catch (error) {
-    console.error("❌ Erro ao inicializar Firebase mensalidades:", error);
-  }
-}
 
 // Configuração de email
 const EMAIL_NODEMAILER = process.env.AUTH_EMAIL_NODEMAILER;
