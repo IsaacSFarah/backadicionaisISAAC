@@ -9806,6 +9806,327 @@ async function confirmarPagamentoMensalidade(req: any, res: any) {
 }
 
 // =====================================
+// COBRANÇAS EXTRAS - ADMINISTRADOR
+// =====================================
+
+function converterValorParaCentavos(valor: unknown): number | null {
+  if (typeof valor !== "string" && typeof valor !== "number") {
+    return null;
+  }
+
+  let texto = String(valor).trim().replace(/\s/g, "");
+
+  if (texto.includes(",") && texto.includes(".")) {
+    texto = texto.replace(/\./g, "").replace(",", ".");
+  } else {
+    texto = texto.replace(",", ".");
+  }
+
+  if (!/^\d+(\.\d{1,2})?$/.test(texto)) {
+    return null;
+  }
+
+  const [inteiros, decimais = ""] = texto.split(".");
+  const centavos =
+    Number(inteiros) * 100 +
+    Number(decimais.padEnd(2, "0"));
+
+  if (
+    !Number.isSafeInteger(centavos) ||
+    centavos <= 0 ||
+    centavos > 2147483647
+  ) {
+    return null;
+  }
+
+  return centavos;
+}
+
+function valorEmReais(centavos: number): string {
+  return (centavos / 100).toFixed(2);
+}
+
+function competenciaValida(valor: unknown): valor is string {
+  if (typeof valor !== "string") return false;
+
+  const resultado = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(valor);
+  if (!resultado) return false;
+
+  const ano = Number(resultado[1]);
+
+  return ano >= 2020 && ano <= 2100;
+}
+
+function adicionarMeses(competencia: string, meses: number): string {
+  const [ano, mes] = competencia.split("-").map(Number);
+
+  const data = new Date(Date.UTC(ano, mes - 1 + meses, 1));
+
+  return (
+    `${data.getUTCFullYear()}-` +
+    `${String(data.getUTCMonth() + 1).padStart(2, "0")}`
+  );
+}
+
+function vencimentoDaCompetencia(competencia: string): Date {
+  const [ano, mes] = competencia.split("-").map(Number);
+
+  return new Date(Date.UTC(ano, mes - 1, 15, 12, 0, 0));
+}
+
+async function cadastrarCobrancaExtra(req: any, res: any) {
+  try {
+    const {
+      clienteId,
+      descricao,
+      observacao,
+      valorTotal,
+      quantidadeParcelas,
+      primeiraCompetencia,
+    } = req.body || {};
+
+    const valorTotalCentavos =
+      converterValorParaCentavos(valorTotal);
+
+    if (
+      typeof clienteId !== "string" ||
+      !clienteId.trim() ||
+      typeof descricao !== "string" ||
+      !descricao.trim() ||
+      descricao.length > 300 ||
+      (observacao != null &&
+        (typeof observacao !== "string" ||
+          observacao.length > 2000)) ||
+      !valorTotalCentavos ||
+      !Number.isInteger(quantidadeParcelas) ||
+      quantidadeParcelas < 1 ||
+      quantidadeParcelas > 60 ||
+      valorTotalCentavos < quantidadeParcelas ||
+      !competenciaValida(primeiraCompetencia)
+    ) {
+      return res.status(400).json({
+        erro: "Dados da cobrança extra inválidos",
+      });
+    }
+
+    const cliente = await prisma.pix_Cliente.findUnique({
+      where: { id: clienteId },
+      select: { id: true },
+    });
+
+    if (!cliente) {
+      return res.status(404).json({
+        erro: "Cliente não encontrado",
+      });
+    }
+
+    const base = Math.floor(
+      valorTotalCentavos / quantidadeParcelas
+    );
+
+    const resto = valorTotalCentavos % quantidadeParcelas;
+
+    const parcelas = Array.from(
+      { length: quantidadeParcelas },
+      (_, indice) => ({
+        numeroParcela: indice + 1,
+        valorCentavos:
+          base + (indice === quantidadeParcelas - 1 ? resto : 0),
+        competencia: adicionarMeses(
+          primeiraCompetencia,
+          indice
+        ),
+      })
+    );
+
+    const resultado = await prisma.$transaction(
+      async (tx) => {
+        // Serializa cadastros simultâneos para o mesmo cliente.
+        await tx.$queryRaw`
+          SELECT "id"
+          FROM "Pix_Cliente"
+          WHERE "id" = ${clienteId}
+          FOR UPDATE
+        `;
+
+        // Não permite adicionar parcelas em competências
+        // cuja mensalidade já foi paga ou substituída.
+        for (const parcela of parcelas) {
+          const vencimento = vencimentoDaCompetencia(
+            parcela.competencia
+          );
+
+          const mensalidade =
+            await tx.pix_PagamentoCliente.findUnique({
+              where: {
+                clienteId_dataDeVencimento: {
+                  clienteId,
+                  dataDeVencimento: vencimento,
+                },
+              },
+              select: {
+                id: true,
+                status: true,
+              },
+            });
+
+          if (
+            mensalidade &&
+            !["ABERTO", "VENCIDO"].includes(mensalidade.status)
+          ) {
+            throw new Error(
+              `COMPETENCIA_FECHADA:${parcela.competencia}`
+            );
+          }
+        }
+
+        const cobranca = await tx.pix_CobrancaExtra.create({
+          data: {
+            clienteId,
+            descricao: descricao.trim(),
+            observacao: observacao?.trim() || null,
+            valorTotalCentavos,
+            quantidadeParcelas,
+            parcelas: {
+              create: parcelas,
+            },
+          },
+          include: {
+            parcelas: true,
+          },
+        });
+
+        // Inclui automaticamente as parcelas quando
+        // a mensalidade correspondente já existe.
+        for (const parcela of cobranca.parcelas) {
+          const vencimento = vencimentoDaCompetencia(
+            parcela.competencia
+          );
+
+          const mensalidade =
+            await tx.pix_PagamentoCliente.findUnique({
+              where: {
+                clienteId_dataDeVencimento: {
+                  clienteId,
+                  dataDeVencimento: vencimento,
+                },
+              },
+              select: {
+                id: true,
+                valor: true,
+                status: true,
+              },
+            });
+
+          if (!mensalidade) continue;
+
+          const valorAtual =
+            converterValorParaCentavos(mensalidade.valor);
+
+          if (valorAtual === null) {
+            throw new Error("VALOR_MENSALIDADE_INVALIDO");
+          }
+
+          const novoValor =
+            valorAtual + parcela.valorCentavos;
+
+          await tx.pix_PagamentoCliente.update({
+            where: { id: mensalidade.id },
+            data: {
+              valor: valorEmReais(novoValor),
+              avisosEnviados: [],
+            },
+          });
+
+          await tx.pix_ParcelaExtra.update({
+            where: { id: parcela.id },
+            data: {
+              mensalidadeId: mensalidade.id,
+            },
+          });
+        }
+
+        return cobranca;
+      },
+      {
+        timeout: 15000,
+      }
+    );
+
+    return res.status(201).json({
+      sucesso: true,
+      mensagem: "Cobrança extra cadastrada com sucesso",
+      cobranca: resultado,
+    });
+  } catch (erro: any) {
+    if (
+      typeof erro?.message === "string" &&
+      erro.message.startsWith("COMPETENCIA_FECHADA:")
+    ) {
+      return res.status(409).json({
+        erro:
+          "Uma das competências já possui mensalidade paga " +
+          "ou substituída. Escolha outro mês.",
+      });
+    }
+
+    console.error("Erro ao cadastrar cobrança extra:", erro);
+
+    return res.status(500).json({
+      erro: "Erro interno ao cadastrar cobrança extra",
+    });
+  }
+}
+
+async function listarCobrancasExtrasAdmin(req: any, res: any) {
+  try {
+    const { clienteId } = req.query;
+
+    if (
+      clienteId !== undefined &&
+      (typeof clienteId !== "string" || !clienteId.trim())
+    ) {
+      return res.status(400).json({
+        erro: "Cliente inválido",
+      });
+    }
+
+    const cobrancas = await prisma.pix_CobrancaExtra.findMany({
+      where: {
+        ...(clienteId ? { clienteId } : {}),
+      },
+      include: {
+        parcelas: {
+          orderBy: {
+            numeroParcela: "asc",
+          },
+        },
+        cliente: {
+          select: {
+            id: true,
+            nome: true,
+          },
+        },
+      },
+      orderBy: {
+        dataCriacao: "desc",
+      },
+    });
+
+    return res.json({
+      sucesso: true,
+      cobrancas,
+    });
+  } catch (erro) {
+    console.error("Erro ao listar cobranças extras:", erro);
+
+    return res.status(500).json({
+      erro: "Erro interno ao consultar cobranças extras",
+    });
+  }
+}
+
+// =====================================
 // IKPAY - ROTAS ADMINISTRATIVAS
 // =====================================
 app.get(
@@ -9820,6 +10141,25 @@ app.patch(
   verifyJwtPessoa,
   verificarAdministradorAtivo,
   confirmarPagamentoMensalidade
+);
+
+
+// =====================================
+// ROTAS ADMIN - COBRANÇAS EXTRAS
+// =====================================
+
+app.post(
+  "/admin/cobrancas-extras",
+  verifyJwtPessoa,
+  verificarAdministradorAtivo,
+  cadastrarCobrancaExtra
+);
+
+app.get(
+  "/admin/cobrancas-extras",
+  verifyJwtPessoa,
+  verificarAdministradorAtivo,
+  listarCobrancasExtrasAdmin
 );
 
 
