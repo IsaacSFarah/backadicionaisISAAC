@@ -138,6 +138,77 @@ type Request = express.Request;
 type Response = express.Response;
 type NextFunction = express.NextFunction;
 
+// =====================================
+// IKPAY - CONFIRMAR PAGAMENTO MENSALIDADE
+// =====================================
+
+// Este handler só deve ser registrado depois de
+// um middleware que valide o ADMINISTRADOR.
+async function confirmarPagamentoMensalidade(
+  req: any,
+  res: any
+) {
+  try {
+    const { id } = req.params;
+
+    if (!id || typeof id !== "string") {
+      return res.status(400).json({
+        erro: "ID da mensalidade inválido",
+      });
+    }
+
+    const resultado = await prisma.pix_PagamentoCliente.updateMany({
+      where: {
+        id,
+        status: {
+          in: ["ABERTO", "VENCIDO"],
+        },
+      },
+      data: {
+        status: "PAGO",
+        dataDoPagamento: new Date(),
+      },
+    });
+
+    if (resultado.count === 0) {
+      const mensalidade =
+        await prisma.pix_PagamentoCliente.findUnique({
+          where: { id },
+          select: { id: true, status: true },
+        });
+
+      if (!mensalidade) {
+        return res.status(404).json({
+          erro: "Mensalidade não encontrada",
+        });
+      }
+
+      if (mensalidade.status === "PAGO") {
+        return res.status(200).json({
+          sucesso: true,
+          mensagem: "Mensalidade já estava paga",
+        });
+      }
+
+      return res.status(409).json({
+        erro: "Esta mensalidade não pode ser confirmada",
+        status: mensalidade.status,
+      });
+    }
+
+    return res.json({
+      sucesso: true,
+      mensagem: "Pagamento confirmado com sucesso",
+    });
+  } catch (erro) {
+    console.error("Erro ao confirmar mensalidade:", erro);
+
+    return res.status(500).json({
+      erro: "Erro interno ao confirmar pagamento",
+    });
+  }
+}
+
 /**
  * Middleware para verificação de JWT padrão
  * Verifica se o token é válido e adiciona o userId ao objeto de requisição
@@ -8146,6 +8217,98 @@ app.get("/link/:id", async (req, res) => {
     return res.status(500).json({ error: "Erro ao buscar link" });
   }
 });
+
+
+// =====================================
+// IKPAY - LISTAR MENSALIDADES
+// =====================================
+
+// Também deve ser usado somente em rota
+// protegida por autorização administrativa.
+async function listarMensalidadesAdmin(
+  req: any,
+  res: any
+) {
+  try {
+    const mensalidades =
+      await prisma.pix_PagamentoCliente.findMany({
+        orderBy: {
+          dataDeVencimento: "desc",
+        },
+        select: {
+          id: true,
+          clienteId: true,
+          valor: true,
+          status: true,
+          dataDeVencimento: true,
+          dataDoPagamento: true,
+          Pix_Cliente: {
+            select: {
+              nome: true,
+              ativo: true,
+            },
+          },
+        },
+      });
+
+    return res.json({
+      sucesso: true,
+      mensalidades,
+    });
+  } catch (erro) {
+    console.error("Erro ao listar mensalidades:", erro);
+
+    return res.status(500).json({
+      erro: "Erro ao consultar mensalidades",
+    });
+  }
+}
+
+async function verificarAdministradorAtivo(
+  req: any,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const administrador = await prisma.pix_Pessoa.findUnique({
+      where: { id: req.userId },
+      select: { id: true },
+    });
+
+    if (!administrador) {
+      res.status(403).json({
+        erro: "Acesso exclusivo do administrador",
+      });
+      return;
+    }
+
+    next();
+  } catch (erro) {
+    console.error("Erro ao verificar administrador:", erro);
+
+    res.status(500).json({
+      erro: "Erro ao validar acesso administrativo",
+    });
+  }
+}
+
+// =====================================
+// IKPAY - ROTAS ADMINISTRATIVAS
+// =====================================
+app.get(
+  "/admin/mensalidades",
+  verifyJwtPessoa,
+  verificarAdministradorAtivo,
+  listarMensalidadesAdmin
+);
+
+app.patch(
+  "/admin/mensalidades/:id/confirmar-pagamento",
+  verifyJwtPessoa,
+  verificarAdministradorAtivo,
+  confirmarPagamentoMensalidade
+);
+
 
 
 
