@@ -9721,6 +9721,9 @@ async function verificarAdministradorAtivo(
 // =====================================
 // IKPAY - CONFIRMAR PAGAMENTO MENSALIDADE
 // =====================================
+// =====================================
+// IKPAY - CONFIRMAR PAGAMENTO MENSALIDADE
+// =====================================
 async function confirmarPagamentoMensalidade(req: any, res: any) {
   try {
     const { id } = req.params;
@@ -9731,73 +9734,132 @@ async function confirmarPagamentoMensalidade(req: any, res: any) {
       });
     }
 
-    const resultado = await prisma.$transaction(async (tx) => {
-      const agora = new Date();
-
-      const atualizacao = await tx.pix_PagamentoCliente.updateMany({
-        where: {
-          id,
-          status: {
-            in: ["ABERTO", "VENCIDO"],
+    const resultado = await prisma.$transaction(
+      async (tx) => {
+        // Primeiro identifica o cliente da mensalidade.
+        const referencia = await tx.pix_PagamentoCliente.findUnique({
+          where: { id },
+          select: {
+            clienteId: true,
           },
-        },
-        data: {
-          status: "PAGO",
-          dataDoPagamento: agora,
-        },
-      });
-
-      if (atualizacao.count === 0) {
-        return { atualizada: false };
-      }
-
-      await tx.pix_ParcelaExtra.updateMany({
-        where: {
-          mensalidadeId: id,
-          dataPagamento: null,
-        },
-        data: {
-          dataPagamento: agora,
-        },
-      });
-
-      return { atualizada: true };
-    });
-
-    if (!resultado.atualizada) {
-      const mensalidade = await prisma.pix_PagamentoCliente.findUnique({
-        where: { id },
-        select: {
-          id: true,
-          status: true,
-        },
-      });
-
-      if (!mensalidade) {
-        return res.status(404).json({
-          erro: "Mensalidade não encontrada",
         });
-      }
 
-      if (mensalidade.status === "PAGO") {
-        return res.json({
-          sucesso: true,
-          mensagem: "Mensalidade já estava paga",
+        if (!referencia) {
+          return {
+            tipo: "NAO_ENCONTRADA",
+          };
+        }
+
+        // Mesmo bloqueio usado no cadastro de extras
+        // e na geração automática das mensalidades.
+        await tx.$queryRaw`
+          SELECT "id"
+          FROM "Pix_Cliente"
+          WHERE "id" = ${referencia.clienteId}
+          FOR UPDATE
+        `;
+
+        // Confere novamente o status após obter o bloqueio.
+        const mensalidade = await tx.pix_PagamentoCliente.findUnique({
+          where: { id },
+          select: {
+            id: true,
+            status: true,
+          },
         });
-      }
 
+        if (!mensalidade) {
+          return {
+            tipo: "NAO_ENCONTRADA",
+          };
+        }
+
+        if (mensalidade.status === "PAGO") {
+          return {
+            tipo: "JA_PAGA",
+          };
+        }
+
+        if (
+          !["ABERTO", "VENCIDO"].includes(mensalidade.status)
+        ) {
+          return {
+            tipo: "STATUS_INVALIDO",
+            status: mensalidade.status,
+          };
+        }
+
+        const agora = new Date();
+
+        const atualizacao = await tx.pix_PagamentoCliente.updateMany({
+          where: {
+            id,
+            status: {
+              in: ["ABERTO", "VENCIDO"],
+            },
+          },
+          data: {
+            status: "PAGO",
+            dataDoPagamento: agora,
+          },
+        });
+
+        if (atualizacao.count !== 1) {
+          throw new Error(
+            "Não foi possível confirmar a mensalidade"
+          );
+        }
+
+        // Confirma todas as parcelas extras vinculadas.
+        await tx.pix_ParcelaExtra.updateMany({
+          where: {
+            mensalidadeId: id,
+            dataPagamento: null,
+          },
+          data: {
+            dataPagamento: agora,
+          },
+        });
+
+        return {
+          tipo: "CONFIRMADA",
+        };
+      },
+      {
+        timeout: 15000,
+      }
+    );
+
+    if (resultado.tipo === "NAO_ENCONTRADA") {
+      return res.status(404).json({
+        erro: "Mensalidade não encontrada",
+      });
+    }
+
+    if (resultado.tipo === "JA_PAGA") {
+      return res.json({
+        sucesso: true,
+        mensagem: "Mensalidade já estava paga",
+      });
+    }
+
+    if (resultado.tipo === "STATUS_INVALIDO") {
       return res.status(409).json({
         erro: "Esta mensalidade não pode ser confirmada",
-        status: mensalidade.status,
+        status: resultado.status,
       });
     }
 
     return res.json({
       sucesso: true,
-      mensagem: "Pagamento e parcelas confirmados com sucesso",
+      mensagem:
+        "Mensalidade e parcelas extras confirmadas com sucesso",
     });
   } catch (erro) {
-    console.error("Erro ao confirmar mensalidade:", erro);
+    console.error(
+      "Erro ao confirmar pagamento da mensalidade:",
+      erro
+    );
 
     return res.status(500).json({
       erro: "Erro interno ao confirmar pagamento",
