@@ -23,6 +23,7 @@ model Pix_Maquina {
   ultimaRequisicao        DateTime?
   nivelDeSinal            Int?
   bonusAtivo              Boolean         @default(false)
+  bloqueadaMensalidade    Boolean         @default(false)
   bonusRegras             Json?           @default("[{\"valorMinimo\": 10, \"bonus\": 2}, {\"valorMinimo\": 20, \"bonus\": 4}, {\"valorMinimo\": 50, \"bonus\": 10}]")
   bonusMetodos            Json? @default("[\"PIX\"]")
   metodoPagamento         String?
@@ -73,6 +74,7 @@ model Pix_Cliente {
   Cobranca             Pix_Cobranca[]
   funcionario          Funcionario[]
   PagamentoCliente     Pix_PagamentoCliente[]
+  FcmToken             Pix_FcmToken[]
 }
 
 model Pix_Pagamento {
@@ -158,8 +160,10 @@ model Pix_PagamentoCliente {
   dataDoPagamento  DateTime?
   diaPagamento     Int
   clienteId        String
+  avisosEnviados   Json      @default("[]")
   Pix_Cliente      Pix_Cliente @relation(fields: [clienteId], references: [id])
 
+  @@unique([clienteId, dataDeVencimento])
   @@map("pagamento-cliente")
 }
 
@@ -196,4 +200,16 @@ enum StatusPgto {
   ABERTO
   VENCIDO
   PAGO
+  SUBSTITUIDO
+}
+
+model Pix_FcmToken {
+  id        String      @id @default(uuid())
+  token     String      @unique
+  clienteId String
+  createdAt DateTime    @default(now())
+  updatedAt DateTime    @updatedAt
+  cliente   Pix_Cliente @relation(fields: [clienteId], references: [id], onDelete: Cascade)
+
+  @@index([clienteId])
 }

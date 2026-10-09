@@ -16,9 +16,99 @@ import { Console, error } from "console";
 import { createServer } from "http";
 import { randomUUID } from "crypto";
 import { WebSocketServer, WebSocket } from "ws";
+import admin from "firebase-admin";
 
 // Configuração de variáveis de ambiente
 dotenv.config();
+
+const firebaseServiceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+
+if (firebaseServiceAccountJson && !admin.apps.length) {
+  try {
+    const firebaseServiceAccount = JSON.parse(firebaseServiceAccountJson);
+
+    admin.initializeApp({
+      credential: admin.credential.cert(firebaseServiceAccount),
+    });
+
+    console.log("🔥 Firebase Admin inicializado com sucesso");
+  } catch (error) {
+    console.error("❌ Erro ao inicializar Firebase Admin:", error);
+  }
+}
+
+async function enviarPushCliente(
+  clienteId: string,
+  titulo: string,
+  mensagem: string
+) {
+  try {
+    if (!admin.apps.length) {
+      console.log("⚠️ Firebase Admin não inicializado");
+      return;
+    }
+
+    const registros = await prisma.pix_FcmToken.findMany({
+      where: {
+        clienteId: clienteId,
+      },
+    });
+
+    if (registros.length === 0) {
+      console.log(`🔕 Cliente ${clienteId} não possui FCM registrado`);
+      return;
+    }
+
+    for (const registro of registros) {
+      try {
+        await admin.messaging().send({
+          token: registro.token,
+          notification: {
+            title: titulo,
+            body: mensagem,
+          },
+          android: {
+            priority: "high",
+          },
+        });
+
+        console.log(`🔔 Push enviado para cliente ${clienteId}`);
+     } catch (error: any) {
+  const codigoErro = error?.code || "";
+
+  console.error(
+    `❌ Erro ao enviar push para ${clienteId}:`,
+    codigoErro || error?.message || error
+  );
+
+  // Remove automaticamente tokens que não existem mais no Firebase
+  if (
+    codigoErro === "messaging/registration-token-not-registered" ||
+    codigoErro === "messaging/invalid-registration-token"
+  ) {
+    try {
+      await prisma.pix_FcmToken.delete({
+        where: {
+          id: registro.id,
+        },
+      });
+
+      console.log(
+        `🧹 Token FCM inválido removido do cliente ${clienteId}`
+      );
+    } catch (erroDelete) {
+      console.error(
+        `❌ Erro ao remover token FCM inválido:`,
+        erroDelete
+      );
+    }
+  }
+}
+    }
+  } catch (error) {
+    console.error("❌ Erro na função enviarPushCliente:", error);
+  }
+}
 
 // Constantes de configuração
 const PORT: string | number = process.env.PORT || 5001;
@@ -29,6 +119,8 @@ const PAGAMENTO_PENDENTE_TIMEOUT_SEGUNDOS = 40;
 
 // Configuração do Prisma
 const prisma = new PrismaClient();
+
+
 
 // Configuração de email
 const EMAIL_NODEMAILER = process.env.AUTH_EMAIL_NODEMAILER;
@@ -88,6 +180,78 @@ async function getBloqueioCliente(clienteId: string) {
   return { bloqueado: false, motivo: "", cliente };
 }
 
+// =====================================
+// IKPAY - CÁLCULO DA MENSALIDADE
+// =====================================
+async function calcularMensalidadeCliente(clienteId: string) {
+
+  const quantidadeMaquinas = await prisma.pix_Maquina.count({
+  where: {
+    clienteId: clienteId,
+    bloqueadaMensalidade: false
+  }
+});
+
+  const valorPorMaquina = quantidadeMaquinas >= 5 ? 29.90 : 35.00;
+
+  const valorTotal = Number(
+    (quantidadeMaquinas * valorPorMaquina).toFixed(2)
+  );
+
+  return {
+    clienteId,
+    quantidadeMaquinas,
+    valorPorMaquina,
+    valorTotal,
+    diaVencimento: 15
+  };
+}
+
+// =====================================
+// IKPAY - GERAR COBRANÇA MENSAL
+// =====================================
+async function gerarCobrancaMensalCliente(
+  clienteId: string,
+  ano: number,
+  mes: number
+) {
+  // mes: 1 = janeiro, 12 = dezembro
+  const vencimento = new Date(Date.UTC(ano, mes - 1, 15, 12, 0, 0));
+
+  const mensalidade = await calcularMensalidadeCliente(clienteId);
+
+  // Cliente sem máquinas liberadas não recebe cobrança
+  if (mensalidade.quantidadeMaquinas === 0) {
+    return { gerada: false, motivo: "SEM_MAQUINAS_LIBERADAS" };
+  }
+
+  const valor = mensalidade.valorTotal.toFixed(2);
+
+  // Evita alterar uma cobrança que já foi gerada
+  const cobranca = await prisma.pix_PagamentoCliente.upsert({
+    where: {
+      clienteId_dataDeVencimento: {
+        clienteId,
+        dataDeVencimento: vencimento
+      }
+    },
+    create: {
+      clienteId,
+      dataDeVencimento: vencimento,
+      valor,
+      status: "ABERTO",
+      diaPagamento: 15,
+      avisosEnviados: []
+    },
+    update: {}
+  });
+
+  return {
+    gerada: true,
+    cobranca
+  };
+}
+
 
 // Variáveis auxiliares (evitam erros de nomes não declarados)
 let ultimoAcessoMaquina01: Date | null = null;
@@ -102,6 +266,7 @@ const httpServer = createServer(app);
 const processandoWebhooks = new Set<string>();
 const espInFlight = new Set<string>();
 const espUltimoHeartbeat = new Map<string, number>();
+const maquinasNotificadasOffline = new Set<string>();
 const monitoramentoCache = new Map<string, number>();
 const dashboardCache = new Map<string, { data: any; expiresAt: number; lastAccessAt: number }>();
 const espSockets = new Map<string, {
@@ -196,25 +361,79 @@ function limparSocketEsp(machineId: string, socket?: WebSocket) {
   }
 }
 
-async function registrarHeartbeatEsp(machineId: string, nivelDeSinal?: number | null) {
+async function registrarHeartbeatEsp(
+  machineId: string,
+  nivelDeSinal?: number | null,
+  notificarOnline: boolean = false
+) {
   const agora = Date.now();
   const ultima = espUltimoHeartbeat.get(machineId) || 0;
-  if (agora - ultima < ESP_HEARTBEAT_WRITE_MS) return;
+
+  if (
+  !notificarOnline &&
+  agora - ultima < ESP_HEARTBEAT_WRITE_MS
+) return;
+
+  console.log("========== HEARTBEAT DEBUG ==========");
+  console.log("machineId recebido:", machineId);
+  console.log("tipo:", typeof machineId);
+
+  const maquinaDebug = await prisma.pix_Maquina.findUnique({
+  where: { id: machineId },
+  select: {
+    id: true,
+    nome: true,
+    clienteId: true,
+    ultimaRequisicao: true,
+  },
+});
+
+const estavaOffline =
+  !maquinaDebug?.ultimaRequisicao ||
+  tempoOffline(maquinaDebug.ultimaRequisicao) >=
+    MAQUINA_OFFLINE_ESTORNO_SEGUNDOS;
+  
+  console.log("Máquina encontrada:", maquinaDebug);
+  console.log("=====================================");
 
   espUltimoHeartbeat.set(machineId, agora);
+
   const dataAtualizacao: any = {
     ultimaRequisicao: new Date(),
   };
-  if (nivelDeSinal !== null && nivelDeSinal !== undefined && !Number.isNaN(nivelDeSinal)) {
+
+  if (
+    nivelDeSinal !== null &&
+    nivelDeSinal !== undefined &&
+    !Number.isNaN(nivelDeSinal)
+  ) {
     dataAtualizacao.nivelDeSinal = nivelDeSinal;
   }
 
-  await prisma.pix_Maquina.update({
-    where: { id: machineId },
-    data: dataAtualizacao,
-  }).catch((err) => {
-    console.error("Erro ao registrar heartbeat WS da ESP:", err);
-  });
+  await prisma.pix_Maquina
+    .update({
+      where: { id: machineId },
+      data: dataAtualizacao,
+    })
+    .catch((err) => {
+      console.error("Erro ao registrar heartbeat WS da ESP:", err);
+    });
+
+  if (
+  notificarOnline &&
+  estavaOffline &&
+  maquinaDebug?.clienteId
+) {
+
+  await enviarPushCliente(
+    String(maquinaDebug.clienteId),
+    "Máquina Online 🟢",
+    `${maquinaDebug.nome || "Máquina"} ficou online`
+  );
+} else {
+  maquinasNotificadasOffline.delete(machineId);
+}
+  
 }
 
 function calcularPulsosParaMaquinaWs(maquina: any) {
@@ -290,22 +509,39 @@ async function tentarEnviarCreditoViaWs(machineId: string, options?: {
   }
 
   const maquina = await prisma.pix_Maquina.findUnique({
-    where: { id: machineId },
-    select: {
-      id: true,
-      nome: true,
-      valorDoPix: true,
-      valorDoPulso: true,
-      metodoPagamento: true,
-      bonusAtivo: true,
-      bonusMetodos: true,
-      bonusRegras: true,
-    },
-  });
+  where: { id: machineId },
+  select: {
+    id: true,
+    nome: true,
+    clienteId: true,
+    bloqueadaMensalidade: true,
+    valorDoPix: true,
+    valorDoPulso: true,
+    metodoPagamento: true,
+    bonusAtivo: true,
+    bonusMetodos: true,
+    bonusRegras: true,
+  },
+});
 
   if (!maquina) {
     return { enviado: false, motivo: "MAQUINA_NAO_ENCONTRADA" as const };
   }
+
+  const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
+
+if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
+  console.log(
+    `🚫 Crédito WS bloqueado: ${maquina.nome} (${machineId})`
+  );
+
+  return {
+    enviado: false,
+    motivo: bloqueio.bloqueado
+      ? "CLIENTE_BLOQUEADO" as const
+      : "MAQUINA_BLOQUEADA_MENSALIDADE" as const,
+  };
+}
 
   const calculo = calcularPulsosParaMaquinaWs(maquina);
   if (calculo.pulsosFormatados === "0000") {
@@ -389,18 +625,61 @@ async function confirmarPendenciaWs(requestId: string, machineId: string, nivelD
   });
 
   if (pendencia.pagamentoId) {
-    await prisma.pix_Pagamento.updateMany({
+  try {
+    const resultadoConfirmacao = await prisma.pix_Pagamento.updateMany({
       where: {
         id: pendencia.pagamentoId,
         estornado: false,
+        status: "PENDENTE",
       },
       data: {
         status: "CONFIRMADO",
       },
-    }).catch((err) => {
-      console.error("Erro ao confirmar pagamento após ACK WS:", err);
     });
+
+    if (resultadoConfirmacao.count > 0) {
+      const pagamentoConfirmado = await prisma.pix_Pagamento.findUnique({
+        where: {
+          id: pendencia.pagamentoId,
+        },
+        include: {
+          maquina: true,
+        },
+      });
+
+      if (
+        pagamentoConfirmado &&
+        pagamentoConfirmado.clienteId
+      ) {
+        const valorFormatado = Number(
+          pagamentoConfirmado.valor
+        )
+          .toFixed(2)
+          .replace(".", ",");
+
+        const tipoPagamento =
+          pagamentoConfirmado.tipo === "credit_card"
+            ? "CRÉDITO"
+            : pagamentoConfirmado.tipo === "debit_card"
+              ? "DÉBITO"
+              : pagamentoConfirmado.tipo === "bank_transfer"
+                ? "PIX"
+                : pagamentoConfirmado.tipo || "PAGAMENTO";
+
+        await enviarPushCliente(
+          String(pagamentoConfirmado.clienteId),
+          "Pagamento recebido 💰",
+          `${pagamentoConfirmado.maquina.nome || "Máquina"} recebeu R$ ${valorFormatado} via ${tipoPagamento}`
+        );
+      }
+    }
+  } catch (err) {
+    console.error(
+      "Erro ao confirmar pagamento após ACK WS:",
+      err
+    );
   }
+}
 
   console.log(`
 ✅ ACK RECEBIDO VIA WS
@@ -482,6 +761,52 @@ setInterval(() => {
   void processarPagamentosPendentes();
 }, 10000);
 
+setInterval(async () => {
+  try {
+    const limiteOffline = new Date(
+      Date.now() - MAQUINA_OFFLINE_ESTORNO_SEGUNDOS * 1000
+    );
+
+    const maquinasOffline = await prisma.pix_Maquina.findMany({
+      where: {
+        ultimaRequisicao: {
+          lt: limiteOffline,
+        },
+      },
+      select: {
+        id: true,
+        nome: true,
+        clienteId: true,
+      },
+    });
+
+    for (const maquina of maquinasOffline) {
+      // Já avisamos sobre esta queda.
+      if (maquinasNotificadasOffline.has(maquina.id)) {
+        continue;
+      }
+
+      // Marca antes do envio para impedir duplicidade.
+      maquinasNotificadasOffline.add(maquina.id);
+
+      if (!maquina.clienteId) {
+        continue;
+      }
+
+      await enviarPushCliente(
+        String(maquina.clienteId),
+        "Máquina Offline 🔴",
+        `${maquina.nome || "Máquina"} ficou offline`
+      );
+    }
+  } catch (err) {
+    console.error(
+      "Erro ao monitorar máquinas offline:",
+      err
+    );
+  }
+}, 15000);
+
 setInterval(() => {
   const limite = Date.now() - 26 * 60 * 60 * 1000;
   for (const [k, ts] of monitoramentoCache) {
@@ -553,7 +878,11 @@ wss.on("connection", (socket, req) => {
         });
         espSocketToMachineId.set(socket, machineId);
 
-        await registrarHeartbeatEsp(machineId, nivelDeSinal);
+        await registrarHeartbeatEsp(
+  machineId,
+  nivelDeSinal,
+  true
+);
 
         socket.send(JSON.stringify({
           type: "hello_ack",
@@ -615,11 +944,13 @@ wss.on("connection", (socket, req) => {
   });
 
   socket.on("close", () => {
-    const machineId = espSocketToMachineId.get(socket);
-    if (!machineId) return;
-    limparSocketEsp(machineId, socket);
-    console.log(`🔌 ESP OFFLINE VIA WS: ${machineId}`);
-  });
+  const machineId = espSocketToMachineId.get(socket);
+  if (!machineId) return;
+
+  limparSocketEsp(machineId, socket);
+
+  console.log(`🔌 ESP DESCONECTOU VIA WS: ${machineId}`);
+});
 
   socket.on("error", (err) => {
     const machineId = espSocketToMachineId.get(socket);
@@ -1065,9 +1396,15 @@ async function estornarMP(id: string, token: string, motivoEstorno: string, tama
     numTentativasEstorno++;
 
     if (numTentativasEstorno < MAX_TENTATIVAS) {
-      // Tentar novamente recursivamente
-      return await estornarMP(id, token, motivoEstorno, tamanhoChave);
-    } else {
+  console.log(
+    `⏳ Estorno falhou. Aguardando 2 segundos antes da tentativa ${numTentativasEstorno}...`
+  );
+
+  await new Promise(resolve => setTimeout(resolve, 2000));
+
+  // Tentar novamente recursivamente
+  return await estornarMP(id, token, motivoEstorno, tamanhoChave);
+} else {
       console.error(
         `Estorno não concluído | pagamento: ${id} | motivo: ${motivoEstorno} | status: ${status ?? "sem status"} | erro: ${motivoErro}`
       );
@@ -1095,6 +1432,8 @@ const WEBHOOK_CONFIG = {
  * Rota para consulta de créditos da máquina 01
  * Retorna os pulsos formatados e zera o valor após a consulta
  */
+
+
 app.get("/consulta-maquina01", async (req, res) => {
   try {
     const resultado = calcularPulsosDinamicos(MAQUINAS.MAQUINA_01.valor, 1.0, null);
@@ -2041,26 +2380,30 @@ app.put("/maquina", verifyJwtPessoa, async (req: any, res) => {
     });
 
     if (!maquina) {
-      return res.status(404).json({ error: "Nenhuma máquina encontrada com o id fornecido." });
+      return res.status(404).json({
+        error: "Nenhuma máquina encontrada com o id fornecido."
+      });
     }
 
-
-    // Condições para verificar duplicidade somente se os valores de store_id e maquininha_serial não forem vazios
+    // Verifica duplicidade dentro do mesmo cliente
     const filtroDuplicidade: any = {
       AND: [
-        { clienteId: maquina.clienteId }, // Filtra pelo cliente
+        { clienteId: maquina.clienteId },
         {
           OR: [
             req.body.nome ? { nome: req.body.nome } : undefined,
-            req.body.store_id !== "" ? { store_id: req.body.store_id } : undefined,
-            req.body.maquininha_serial !== "" ? { maquininha_serial: req.body.maquininha_serial } : undefined
-          ].filter(Boolean) // Remove condições indefinidas
+            req.body.store_id !== ""
+              ? { store_id: req.body.store_id }
+              : undefined,
+            req.body.maquininha_serial !== ""
+              ? { maquininha_serial: req.body.maquininha_serial }
+              : undefined
+          ].filter(Boolean)
         },
-        { NOT: { id: req.body.id } } // Exclui a máquina atual da verificação
+        { NOT: { id: req.body.id } }
       ]
     };
 
-    // Verifique se já existe uma máquina com o mesmo nome, store_id ou maquininha_serial para este cliente, mas exclua a máquina atual
     const maquinaExistente = await prisma.pix_Maquina.findFirst({
       where: filtroDuplicidade,
       select: {
@@ -2077,8 +2420,7 @@ app.put("/maquina", verifyJwtPessoa, async (req: any, res) => {
       });
     }
 
-    // Se não houver conflitos, atualiza a máquina
-    // Monta o objeto de atualização sem sobrescrever campos não enviados
+    // Dados que serão atualizados
     const dataUpdate1: any = {
       nome: req.body.nome,
       descricao: req.body.descricao,
@@ -2089,14 +2431,24 @@ app.put("/maquina", verifyJwtPessoa, async (req: any, res) => {
       bonusMetodos: req.body.bonusMetodos,
     };
 
-    // Atualiza store_id somente se vier no body; vazio limpa explicitamente
-    if (typeof req.body.store_id !== 'undefined') {
-      dataUpdate1.store_id = req.body.store_id === "" ? null : req.body.store_id;
+    // Bloqueio individual por mensalidade
+    if (typeof req.body.bloqueadaMensalidade === "boolean") {
+      dataUpdate1.bloqueadaMensalidade =
+        req.body.bloqueadaMensalidade;
     }
 
-    // Atualiza maquininha_serial somente se vier no body; vazio limpa explicitamente
-    if (typeof req.body.maquininha_serial !== 'undefined') {
-      dataUpdate1.maquininha_serial = req.body.maquininha_serial === "" ? null : req.body.maquininha_serial;
+    // Atualiza store_id somente se vier no body
+    if (typeof req.body.store_id !== "undefined") {
+      dataUpdate1.store_id =
+        req.body.store_id === "" ? null : req.body.store_id;
+    }
+
+    // Atualiza maquininha_serial somente se vier no body
+    if (typeof req.body.maquininha_serial !== "undefined") {
+      dataUpdate1.maquininha_serial =
+        req.body.maquininha_serial === ""
+          ? null
+          : req.body.maquininha_serial;
     }
 
     const maquinaAtualizada = await prisma.pix_Maquina.update({
@@ -2104,12 +2456,19 @@ app.put("/maquina", verifyJwtPessoa, async (req: any, res) => {
       data: dataUpdate1,
     });
 
-    console.log('Máquina atualizada com sucesso:', maquinaAtualizada);
+    console.log(
+      "Máquina atualizada com sucesso:",
+      maquinaAtualizada
+    );
 
     return res.status(200).json(maquinaAtualizada);
+
   } catch (err: any) {
     console.log(err);
-    return res.status(500).json({ error: `Erro ao atualizar a máquina: ${err.message}` });
+
+    return res.status(500).json({
+      error: `Erro ao atualizar a máquina: ${err.message}`
+    });
   }
 });
 
@@ -2458,6 +2817,29 @@ app.get("/consultar-maquina/:id", async (req: any, res) => {
 //     return res.status(500).json({ "retorno": "0000" });
 //   }
 // });
+app.get("/mensalidade/:clienteId", verifyJWT, async (req: any, res) => {
+  try {
+    const { clienteId } = req.params;
+
+    // Impede consultar a mensalidade de outro cliente
+    if (String(req.userId) !== String(clienteId)) {
+      return res.status(403).json({
+        erro: "ACESSO_NEGADO"
+      });
+    }
+
+    const mensalidade = await calcularMensalidadeCliente(clienteId);
+
+    return res.status(200).json(mensalidade);
+
+  } catch (error) {
+    console.error("Erro ao consultar mensalidade:", error);
+
+    return res.status(500).json({
+      erro: "ERRO_CONSULTAR_MENSALIDADE"
+    });
+  }
+});
 
 app.get("/consultar-maquina/:id", async (req: any, res: any) => {
   try {
@@ -2500,38 +2882,59 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
         id: maquinaId,
       },
       select: {
-        id: true,
-        clienteId: true,
-        nome: true,
-        valorDoPix: true,
-        valorDoPulso: true,
-        metodoPagamento: true,
-        bonusAtivo: true,
-        bonusMetodos: true,
-        bonusRegras: true,
-      },
+  id: true,
+  clienteId: true,
+  nome: true,
+  valorDoPix: true,
+  valorDoPulso: true,
+  metodoPagamento: true,
+  bonusAtivo: true,
+  bonusMetodos: true,
+  bonusRegras: true,
+  ultimaRequisicao: true,
+  bloqueadaMensalidade: true,
+},
     });
 
     let pulsosFormatados = "0000";
 
     if (maquina) {
+      const estavaOffline =
+  !maquina.ultimaRequisicao ||
+  tempoOffline(maquina.ultimaRequisicao) >=
+    MAQUINA_OFFLINE_ESTORNO_SEGUNDOS;
+
+if (estavaOffline && maquina.clienteId) {
+  maquinasNotificadasOffline.delete(maquinaId);
+
+  void enviarPushCliente(
+    String(maquina.clienteId),
+    "Máquina Online 🟢",
+    `${maquina.nome || "Máquina"} ficou online`
+  );
+} else {
+  maquinasNotificadasOffline.delete(maquinaId);
+}
 
       const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
-      const sinalInt =
-        nivelDeSinal != undefined
-          ? normalizeSignalLevel(parseInt(String(nivelDeSinal), 10))
-          : null;
-      if (bloqueio.bloqueado) {
-        await prisma.pix_Maquina.update({
-          where: { id: maquinaId },
-          data: {
-            valorDoPix: "0",
-            ultimaRequisicao: new Date(),
-            nivelDeSinal: sinalInt,
-          },
-        });
-        return res.status(200).json({ retorno: "0000" });
-      }
+
+const sinalInt =
+  nivelDeSinal != undefined
+    ? normalizeSignalLevel(parseInt(String(nivelDeSinal), 10))
+    : null;
+
+if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
+  await prisma.pix_Maquina.update({
+    where: { id: maquinaId },
+    data: {
+      valorDoPix: "0",
+      ultimaRequisicao: new Date(),
+      nivelDeSinal: sinalInt,
+    },
+  });
+
+  return res.status(200).json({ retorno: "0000" });
+}
 
       const requestIdWsPendente = espWsPendenciaPorMaquina.get(maquinaId);
       if (requestIdWsPendente) {
@@ -2604,11 +3007,47 @@ app.get("/consultar-maquina/:id", async (req: any, res: any) => {
         select: { id: true },
       });
       if (pagamentoPendente) {
-        await prisma.pix_Pagamento.update({
-          where: { id: pagamentoPendente.id },
-          data: { status: "CONFIRMADO" },
-        });
-      }
+  await prisma.pix_Pagamento.update({
+    where: { id: pagamentoPendente.id },
+    data: { status: "CONFIRMADO" },
+  });
+
+  const pagamentoConfirmado =
+      await prisma.pix_Pagamento.findUnique({
+    where: {
+      id: pagamentoPendente.id,
+    },
+    include: {
+      maquina: true,
+    },
+  });
+
+  if (
+    pagamentoConfirmado &&
+    pagamentoConfirmado.clienteId
+  ) {
+    const valorFormatado = Number(
+      pagamentoConfirmado.valor
+    )
+        .toFixed(2)
+        .replace(".", ",");
+
+    const tipoPagamento =
+        pagamentoConfirmado.tipo === "credit_card"
+            ? "CRÉDITO"
+            : pagamentoConfirmado.tipo === "debit_card"
+                ? "DÉBITO"
+                : pagamentoConfirmado.tipo === "bank_transfer"
+                    ? "PIX"
+                    : pagamentoConfirmado.tipo || "PAGAMENTO";
+
+    await enviarPushCliente(
+      String(pagamentoConfirmado.clienteId),
+      "Pagamento recebido 💰",
+      `${pagamentoConfirmado.maquina.nome || "Máquina"} recebeu R$ ${valorFormatado} via ${tipoPagamento}`
+    );
+  }
+}
 
       const metodoPagamento = String(maquina.metodoPagamento || "PIX").toUpperCase();
 
@@ -2913,6 +3352,14 @@ app.post("/credito-remoto-cliente", verifyJWT, async (req: any, res) => {
     // ==============================
     if (maquina.cliente !== null && maquina.cliente !== undefined) {
 
+      if (maquina.bloqueadaMensalidade === true) {
+  console.log(`🚫 Crédito remoto cliente bloqueado: ${maquina.nome}`);
+
+  return res.status(403).json({
+    retorno: "MAQUINA_BLOQUEADA_MENSALIDADE"
+  });
+}
+
       if (
         maquina.cliente.ativo &&
         !isInadimplente(maquina.cliente.dataVencimento)
@@ -3172,6 +3619,53 @@ app.post("/login-cliente", async (req, res) => {
     const { message } = error as Error;
 
     return res.status(403).json({ error: message });
+  }
+});
+
+app.post("/registrar-fcm-token", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ error: "Token de autenticação não informado" });
+    }
+
+    const jwtToken = authHeader.substring(7);
+
+    const decoded = jwt.verify(jwtToken, SECRET as string) as {
+      userId: string;
+    };
+
+    const fcmToken = String(req.body.token || "").trim();
+
+    if (!fcmToken) {
+      return res.status(400).json({ error: "FCM token não informado" });
+    }
+
+    await prisma.pix_FcmToken.upsert({
+      where: {
+        token: fcmToken,
+      },
+      update: {
+        clienteId: decoded.userId,
+      },
+      create: {
+        token: fcmToken,
+        clienteId: decoded.userId,
+      },
+    });
+
+    console.log(`🔔 FCM registrado para cliente ${decoded.userId}`);
+
+    return res.json({
+      success: true,
+    });
+  } catch (error) {
+    console.error("❌ Erro ao registrar FCM:", error);
+
+    return res.status(401).json({
+      error: "Não foi possível registrar o FCM token",
+    });
   }
 });
 
@@ -4372,6 +4866,50 @@ app.post("/rota-recebimento-mercado-pago-dinamica/:id", async (req: any, res: an
     }
 
     // ================================
+// BLOQUEIO INDIVIDUAL POR MENSALIDADE
+// ================================
+if (maquina.bloqueadaMensalidade === true) {
+  console.log(
+    `🚫 Pagamento em máquina bloqueada: ${maquina.nome} (${maquina.id})`
+  );
+
+  const jaEstornado = await prisma.pix_Pagamento.findFirst({
+    where: {
+      mercadoPagoId: paymentId,
+      estornado: true
+    }
+  });
+
+  if (!jaEstornado) {
+    const estorno = await estornarMP(
+      paymentId,
+      tokenCliente,
+      "maquina bloqueada por mensalidade"
+    );
+
+    if (!estorno) {
+      console.log("❌ Falha no estorno da máquina bloqueada");
+      processandoWebhooks.delete(paymentId);
+      return res.status(200).end();
+    }
+
+    await prisma.pix_Pagamento.create({
+      data: {
+        maquinaId: maquina.id,
+        valor: valor.toString(),
+        mercadoPagoId: paymentId,
+        motivoEstorno: "maquina bloqueada",
+        estornado: true,
+        clienteId: cliente.id
+      }
+    });
+  }
+
+  processandoWebhooks.delete(paymentId);
+  return res.status(200).end();
+}
+
+    // ================================
     // 7. MÁQUINA OFFLINE
     // ================================
     let status = "ONLINE";
@@ -5004,13 +5542,18 @@ app.post("/rota-recebimento-especie/:id", async (req: any, res: any) => {
 
     const value = Number(req.query.valor);
 
-    if (maquina) {
-      const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
-      if (bloqueio.bloqueado) {
-        return res.status(403).json({ retorno: "CLIENTE_BLOQUEADO" });
-      }
+if (maquina) {
+  const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
 
-      const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || "");
+  if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
+    return res.status(403).json({
+      retorno: bloqueio.bloqueado
+        ? "CLIENTE_BLOQUEADO"
+        : "MAQUINA_BLOQUEADA_MENSALIDADE"
+    });
+  }
+
+  const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || "");
       console.log(`
 💵 RECEBIMENTO EM ESPÉCIE
 👤 Cliente: ${maquina?.cliente?.nome || ""} (${maquina.clienteId})
@@ -5219,23 +5762,41 @@ app.post("/decrementar-estoque/:id/", async (req: any, res: any) => {
         }
       });
 
-      console.log(`Saída de ${quantidade} produto(s) registrada para o cliente ${maquina.cliente?.nome} com valor acumulado de R$ ${valorAcumulado.toFixed(2)}`);
+          console.log(
+        `Saída de ${quantidade} produto(s) registrada para o cliente ${maquina.cliente?.nome} com valor acumulado de R$ ${valorAcumulado.toFixed(2)}`
+      );
+
+      await enviarPushCliente(
+        String(maquina.clienteId),
+        "Saiu Produto 🎁",
+        `${maquina.nome || "Máquina"} liberou ${quantidade} produto(s) • Gerou R$ ${valorAcumulado.toFixed(2).replace(".", ",")}`
+      );
     }
 
     if (NOTIFICACOES_ESTOQUE) {
-      notificarDiscord(DISCORD_WEBHOOKS.ESTOQUE, `Item vendido.`, ` Maquina: ${maquina?.nome}. Maquina: ${maquina?.descricao}. Cliente: ${maquina.cliente?.nome}`)
+      notificarDiscord(
+        DISCORD_WEBHOOKS.ESTOQUE,
+        `Item vendido.`,
+        ` Maquina: ${maquina?.nome}. Maquina: ${maquina?.descricao}. Cliente: ${maquina.cliente?.nome}`
+      );
     }
 
     console.log("Estoque atualizado");
-    return res.status(200).json({ "Estoque atual": `${novoEstoque}`, "Registro": "Saída de produto registrada no relatório do cliente" });
+
+    return res.status(200).json({
+      "Estoque atual": `${novoEstoque}`,
+      "Registro": "Saída de produto registrada no relatório do cliente"
+    });
+
   } catch (error) {
     console.error("Error updating stock:", error);
-    return res.status(404).json({ "retorno": "Erro ao tentar atualizar estoque" });
+
+    return res.status(404).json({
+      "retorno": "Erro ao tentar atualizar estoque"
+    });
   }
-
-
 });
-
+    
 //id da maquina e a quantidade ?valor=1
 app.post('/setar-estoque/:id', async (req, res) => {
   try {
@@ -7945,15 +8506,16 @@ app.get("/machines-client", verifyJWT, async (req: any, res) => {
       }
 
       const maquinaDetalhe = {
-        status: status,
-        nome: maquina.nome,
-        descricao: maquina.descricao || "",
-        store_id: maquina.store_id || "",
-        maquininha_serial: maquina.maquininha_serial || "",
-        bonusAtivo: maquina.bonusAtivo,
-        bonusRegras: maquina.bonusRegras,
-        clienteNome: maquina.cliente ? maquina.cliente.nome : "",
-      };
+  id: maquina.id,
+  status: status,
+  nome: maquina.nome,
+  descricao: maquina.descricao || "",
+  store_id: maquina.store_id || "",
+  maquininha_serial: maquina.maquininha_serial || "",
+  bonusAtivo: maquina.bonusAtivo,
+  bonusRegras: maquina.bonusRegras,
+  clienteNome: maquina.cliente ? maquina.cliente.nome : "",
+};
 
       // Separando as máquinas em online e offline
       if (status === 'online' || status === 'PAGAMENTO_RECENTE') {
@@ -8968,6 +9530,20 @@ app.post("/usar-link/:id", async (req, res) => {
       return res.status(404).json({ error: "Máquina não encontrada" });
     }
 
+    const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
+
+if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
+  console.log(
+    `🚫 Link bloqueado: ${maquina.nome} (${maquina.id})`
+  );
+
+  return res.status(403).json({
+    error: bloqueio.bloqueado
+      ? "CLIENTE_BLOQUEADO"
+      : "MAQUINA_BLOQUEADA_MENSALIDADE"
+  });
+}
+
     // 🔥 VERIFICAR ANTES DE LIBERAR
     if (maquina.ultimaRequisicao) {
       const status = tempoOffline(maquina.ultimaRequisicao) > 60 ? "OFFLINE" : "ONLINE";
@@ -9068,6 +9644,174 @@ app.get("/link/:id", async (req, res) => {
     return res.status(500).json({ error: "Erro ao buscar link" });
   }
 });
+
+// =====================================
+// IKPAY - LISTAR MENSALIDADES
+// =====================================
+
+// Também deve ser usado somente em rota
+// protegida por autorização administrativa.
+async function listarMensalidadesAdmin(
+  req: any,
+  res: any
+) {
+  try {
+    const mensalidades =
+      await prisma.pix_PagamentoCliente.findMany({
+        orderBy: {
+          dataDeVencimento: "desc",
+        },
+        select: {
+          id: true,
+          clienteId: true,
+          valor: true,
+          status: true,
+          dataDeVencimento: true,
+          dataDoPagamento: true,
+          Pix_Cliente: {
+            select: {
+              nome: true,
+              ativo: true,
+            },
+          },
+        },
+      });
+
+    return res.json({
+      sucesso: true,
+      mensalidades,
+    });
+  } catch (erro) {
+    console.error("Erro ao listar mensalidades:", erro);
+
+    return res.status(500).json({
+      erro: "Erro ao consultar mensalidades",
+    });
+  }
+}
+
+async function verificarAdministradorAtivo(
+  req: any,
+  res: Response,
+  next: NextFunction
+): Promise<void> {
+  try {
+    const administrador = await prisma.pix_Pessoa.findUnique({
+      where: { id: req.userId },
+      select: { id: true },
+    });
+
+    if (!administrador) {
+      res.status(403).json({
+        erro: "Acesso exclusivo do administrador",
+      });
+      return;
+    }
+
+    next();
+  } catch (erro) {
+    console.error("Erro ao verificar administrador:", erro);
+
+    res.status(500).json({
+      erro: "Erro ao validar acesso administrativo",
+    });
+  }
+}
+
+// =====================================
+// IKPAY - CONFIRMAR PAGAMENTO MENSALIDADE
+// =====================================
+async function confirmarPagamentoMensalidade(req: any, res: any) {
+  try {
+    const { id } = req.params;
+
+    if (!id || typeof id !== "string") {
+      return res.status(400).json({
+        erro: "ID da mensalidade inválido",
+      });
+    }
+
+    const resultado = await prisma.pix_PagamentoCliente.updateMany({
+      where: {
+        id,
+        status: {
+          in: ["ABERTO", "VENCIDO"],
+        },
+      },
+      data: {
+        status: "PAGO",
+        dataDoPagamento: new Date(),
+      },
+    });
+
+    if (resultado.count === 0) {
+      const mensalidade = await prisma.pix_PagamentoCliente.findUnique({
+        where: { id },
+        select: {
+          id: true,
+          status: true,
+        },
+      });
+
+      if (!mensalidade) {
+        return res.status(404).json({
+          erro: "Mensalidade não encontrada",
+        });
+      }
+
+      if (mensalidade.status === "PAGO") {
+        return res.status(200).json({
+          sucesso: true,
+          mensagem: "Mensalidade já estava paga",
+        });
+      }
+
+      return res.status(409).json({
+        erro: "Esta mensalidade não pode ser confirmada",
+        status: mensalidade.status,
+      });
+    }
+
+    return res.json({
+      sucesso: true,
+      mensagem: "Pagamento confirmado com sucesso",
+    });
+  } catch (erro) {
+    console.error("Erro ao confirmar mensalidade:", erro);
+
+    return res.status(500).json({
+      erro: "Erro interno ao confirmar pagamento",
+    });
+  }
+}
+
+// =====================================
+// IKPAY - ROTAS ADMINISTRATIVAS
+// =====================================
+app.get(
+  "/admin/mensalidades",
+  verifyJwtPessoa,
+  verificarAdministradorAtivo,
+  listarMensalidadesAdmin
+);
+
+app.patch(
+  "/admin/mensalidades/:id/confirmar-pagamento",
+  verifyJwtPessoa,
+  verificarAdministradorAtivo,
+  confirmarPagamentoMensalidade
+);
+
+
+
+
+//git add . 
+
+//git commit -m "msg"
+
+//git push 
+
+// Aplicação já está ouvindo acima; evite múltiplos app.listen.
 
 
 
