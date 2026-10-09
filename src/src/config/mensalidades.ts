@@ -3,6 +3,44 @@ import * as admin from "firebase-admin";
 
 const prisma = new PrismaClient();
 
+// =====================================
+// IKPAY - CALCULAR MENSALIDADE
+// =====================================
+async function calcularMensalidade(clienteId: string) {
+  const cliente = await prisma.pix_Cliente.findUnique({
+    where: { id: clienteId },
+    select: { ativo: true },
+  });
+
+  // Cliente inexistente ou inativo não recebe cobrança
+  if (!cliente || cliente.ativo === false) {
+    return {
+      quantidadeMaquinas: 0,
+      valorPorMaquina: 0,
+      valorTotal: 0,
+    };
+  }
+
+  const quantidadeMaquinas = await prisma.pix_Maquina.count({
+    where: {
+      clienteId,
+      bloqueadaMensalidade: false,
+    },
+  });
+
+  const valorPorMaquina = quantidadeMaquinas >= 5 ? 29.90 : 35.00;
+
+  const valorTotal = Number(
+    (quantidadeMaquinas * valorPorMaquina).toFixed(2)
+  );
+
+  return {
+    quantidadeMaquinas,
+    valorPorMaquina,
+    valorTotal,
+  };
+}
+
 async function executarMensalidades() {
   const agora = new Date();
 
