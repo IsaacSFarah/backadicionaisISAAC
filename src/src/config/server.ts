@@ -9731,20 +9731,40 @@ async function confirmarPagamentoMensalidade(req: any, res: any) {
       });
     }
 
-    const resultado = await prisma.pix_PagamentoCliente.updateMany({
-      where: {
-        id,
-        status: {
-          in: ["ABERTO", "VENCIDO"],
+    const resultado = await prisma.$transaction(async (tx) => {
+      const agora = new Date();
+
+      const atualizacao = await tx.pix_PagamentoCliente.updateMany({
+        where: {
+          id,
+          status: {
+            in: ["ABERTO", "VENCIDO"],
+          },
         },
-      },
-      data: {
-        status: "PAGO",
-        dataDoPagamento: new Date(),
-      },
+        data: {
+          status: "PAGO",
+          dataDoPagamento: agora,
+        },
+      });
+
+      if (atualizacao.count === 0) {
+        return { atualizada: false };
+      }
+
+      await tx.pix_ParcelaExtra.updateMany({
+        where: {
+          mensalidadeId: id,
+          dataPagamento: null,
+        },
+        data: {
+          dataPagamento: agora,
+        },
+      });
+
+      return { atualizada: true };
     });
 
-    if (resultado.count === 0) {
+    if (!resultado.atualizada) {
       const mensalidade = await prisma.pix_PagamentoCliente.findUnique({
         where: { id },
         select: {
@@ -9760,7 +9780,7 @@ async function confirmarPagamentoMensalidade(req: any, res: any) {
       }
 
       if (mensalidade.status === "PAGO") {
-        return res.status(200).json({
+        return res.json({
           sucesso: true,
           mensagem: "Mensalidade já estava paga",
         });
@@ -9774,7 +9794,7 @@ async function confirmarPagamentoMensalidade(req: any, res: any) {
 
     return res.json({
       sucesso: true,
-      mensagem: "Pagamento confirmado com sucesso",
+      mensagem: "Pagamento e parcelas confirmados com sucesso",
     });
   } catch (erro) {
     console.error("Erro ao confirmar mensalidade:", erro);
