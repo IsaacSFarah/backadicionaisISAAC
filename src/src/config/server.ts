@@ -206,9 +206,49 @@ async function calcularMensalidadeCliente(clienteId: string) {
 }
 
 // =====================================
-// IKPAY - CONSULTAR MENSALIDADE
+// IKPAY - GERAR COBRANÇA MENSAL
 // =====================================
+async function gerarCobrancaMensalCliente(
+  clienteId: string,
+  ano: number,
+  mes: number
+) {
+  // mes: 1 = janeiro, 12 = dezembro
+  const vencimento = new Date(Date.UTC(ano, mes - 1, 15, 12, 0, 0));
 
+  const mensalidade = await calcularMensalidadeCliente(clienteId);
+
+  // Cliente sem máquinas liberadas não recebe cobrança
+  if (mensalidade.quantidadeMaquinas === 0) {
+    return { gerada: false, motivo: "SEM_MAQUINAS_LIBERADAS" };
+  }
+
+  const valor = mensalidade.valorTotal.toFixed(2);
+
+  // Evita alterar uma cobrança que já foi gerada
+  const cobranca = await prisma.pix_PagamentoCliente.upsert({
+    where: {
+      clienteId_dataDeVencimento: {
+        clienteId,
+        dataDeVencimento: vencimento
+      }
+    },
+    create: {
+      clienteId,
+      dataDeVencimento: vencimento,
+      valor,
+      status: "ABERTO",
+      diaPagamento: 15,
+      avisosEnviados: []
+    },
+    update: {}
+  });
+
+  return {
+    gerada: true,
+    cobranca
+  };
+}
 
 
 // Variáveis auxiliares (evitam erros de nomes não declarados)
