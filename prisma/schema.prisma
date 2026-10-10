@@ -243,15 +243,9 @@ model Pix_ParcelaExtra {
   competencia        String
   dataPagamento      DateTime?
 
-  cobrancaExtra      Pix_CobrancaExtra @relation(
-    fields: [cobrancaExtraId],
-    references: [id]
-  )
+  cobrancaExtra Pix_CobrancaExtra @relation(fields: [cobrancaExtraId], references: [id])
 
-  mensalidade        Pix_PagamentoCliente? @relation(
-    fields: [mensalidadeId],
-    references: [id]
-  )
+  mensalidade Pix_PagamentoCliente? @relation(fields: [mensalidadeId], references: [id])
 
   @@unique([cobrancaExtraId, numeroParcela])
   @@index([competencia])
