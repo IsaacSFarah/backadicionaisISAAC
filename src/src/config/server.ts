@@ -10257,13 +10257,19 @@ async function quitarCobrancaExtra(req: any, res: any) {
             throw new Error("VALOR_MENSALIDADE_INVALIDO");
           }
 
-          await tx.pix_PagamentoCliente.update({
-            where: { id: mensalidadeId },
-            data: {
-              valor: valorEmReais(valorAtual - desconto),
-              avisosEnviados: [],
-            },
-          });
+          const saldoRestante = valorAtual - desconto;
+
+await tx.pix_PagamentoCliente.update({
+  where: { id: mensalidadeId },
+  data: {
+    valor: valorEmReais(saldoRestante),
+    status:
+      saldoRestante === 0
+        ? "ENCERRADO_SEM_SALDO"
+        : mensalidade.status,
+    avisosEnviados: [],
+  },
+});
         }
 
         const agora = new Date();
