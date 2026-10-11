@@ -425,11 +425,13 @@ async function avisarMensalidadeCliente(
   });
 
   if (
-    !cobranca ||
-    !["ABERTO", "VENCIDO"].includes(cobranca.status)
-  ) {
-    return;
-  }
+  !cobranca ||
+  !["ABERTO", "VENCIDO"].includes(cobranca.status) ||
+  !Number.isFinite(Number(cobranca.valor)) ||
+  Number(cobranca.valor) <= 0
+) {
+  return;
+}
 
   const avisos = Array.isArray(cobranca.avisosEnviados)
     ? cobranca.avisosEnviados
