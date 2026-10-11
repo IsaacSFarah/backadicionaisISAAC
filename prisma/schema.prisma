@@ -204,6 +204,7 @@ enum StatusPgto {
   VENCIDO
   PAGO
   SUBSTITUIDO
+  ENCERRADO_SEM_SALDO
 }
 
 model Pix_FcmToken {
