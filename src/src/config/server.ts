@@ -10143,10 +10143,22 @@ async function cadastrarCobrancaExtra(req: any, res: any) {
 async function quitarCobrancaExtra(req: any, res: any) {
   try {
     const { id } = req.params;
+    const { parcelasIds } = req.body || {};
 
-    if (typeof id !== "string" || !id.trim()) {
+    if (
+      typeof id !== "string" ||
+      !id.trim() ||
+      !Array.isArray(parcelasIds) ||
+      parcelasIds.length === 0 ||
+      parcelasIds.length > 60 ||
+      parcelasIds.some(
+        (parcelaId: any) =>
+          typeof parcelaId !== "string" || !parcelaId.trim()
+      ) ||
+      new Set(parcelasIds).size !== parcelasIds.length
+    ) {
       return res.status(400).json({
-        erro: "ID da cobrança extra inválido",
+        erro: "Selecione parcelas válidas para confirmar",
       });
     }
 
@@ -10187,30 +10199,35 @@ async function quitarCobrancaExtra(req: any, res: any) {
           return { tipo: "CANCELADA" };
         }
 
-        const pendentes = cobranca.parcelas.filter(
-          (parcela) => !parcela.dataPagamento
+        const selecionadas = cobranca.parcelas.filter(
+          (parcela) => parcelasIds.includes(parcela.id)
         );
 
-        if (pendentes.length === 0) {
-          return { tipo: "JA_QUITADA" };
+        if (selecionadas.length !== parcelasIds.length) {
+          return { tipo: "PARCELAS_INVALIDAS" };
         }
 
-        // Impede alterações em mensalidades já finalizadas.
-        for (const parcela of pendentes) {
-          if (
-            parcela.mensalidade &&
-            !["ABERTO", "VENCIDO"].includes(
-              parcela.mensalidade.status
-            )
-          ) {
-            return { tipo: "MENSALIDADE_FECHADA" };
-          }
+        if (
+          selecionadas.some((parcela) => !!parcela.dataPagamento)
+        ) {
+          return { tipo: "PARCELA_JA_PAGA" };
         }
 
-        // Agrupa os valores a retirar de cada mensalidade.
+        if (
+          selecionadas.some(
+            (parcela) =>
+              parcela.mensalidade &&
+              !["ABERTO", "VENCIDO"].includes(
+                parcela.mensalidade.status
+              )
+          )
+        ) {
+          return { tipo: "MENSALIDADE_FECHADA" };
+        }
+
         const descontos = new Map<string, number>();
 
-        for (const parcela of pendentes) {
+        for (const parcela of selecionadas) {
           if (!parcela.mensalidadeId) continue;
 
           descontos.set(
@@ -10240,25 +10257,21 @@ async function quitarCobrancaExtra(req: any, res: any) {
             throw new Error("VALOR_MENSALIDADE_INVALIDO");
           }
 
-          const novoValor = valorAtual - desconto;
-
-await tx.pix_PagamentoCliente.update({
-  where: { id: mensalidadeId },
-  data: {
-    valor: valorEmReais(novoValor),
-    avisosEnviados: [],
-    ...(novoValor === 0
-      ? { status: "SUBSTITUIDO" }
-      : {}),
-  },
-});
+          await tx.pix_PagamentoCliente.update({
+            where: { id: mensalidadeId },
+            data: {
+              valor: valorEmReais(valorAtual - desconto),
+              avisosEnviados: [],
+            },
+          });
         }
 
         const agora = new Date();
 
-        await tx.pix_ParcelaExtra.updateMany({
+        const atualizacao = await tx.pix_ParcelaExtra.updateMany({
           where: {
             cobrancaExtraId: id,
+            id: { in: parcelasIds },
             dataPagamento: null,
           },
           data: {
@@ -10267,9 +10280,19 @@ await tx.pix_PagamentoCliente.update({
           },
         });
 
+        if (atualizacao.count !== selecionadas.length) {
+          throw new Error("PARCELAS_NAO_ATUALIZADAS");
+        }
+
+        const totalPagoCentavos = selecionadas.reduce(
+          (total, parcela) => total + parcela.valorCentavos,
+          0
+        );
+
         return {
-          tipo: "QUITADA",
-          parcelasQuitadas: pendentes.length,
+          tipo: "CONFIRMADA",
+          parcelasPagas: selecionadas.length,
+          totalPagoCentavos,
         };
       },
       { timeout: 15000 }
@@ -10283,29 +10306,39 @@ await tx.pix_PagamentoCliente.update({
 
     if (resultado.tipo === "CANCELADA") {
       return res.status(409).json({
-        erro: "Não é possível quitar uma cobrança cancelada",
+        erro: "Esta cobrança foi cancelada",
+      });
+    }
+
+    if (resultado.tipo === "PARCELAS_INVALIDAS") {
+      return res.status(400).json({
+        erro: "Uma ou mais parcelas não pertencem à cobrança",
+      });
+    }
+
+    if (resultado.tipo === "PARCELA_JA_PAGA") {
+      return res.status(409).json({
+        erro: "Uma das parcelas selecionadas já foi paga",
       });
     }
 
     if (resultado.tipo === "MENSALIDADE_FECHADA") {
       return res.status(409).json({
-        erro: "Existem parcelas vinculadas a mensalidades finalizadas",
+        erro: "Uma das parcelas pertence a uma mensalidade finalizada",
       });
     }
 
     return res.json({
       sucesso: true,
-      mensagem:
-        resultado.tipo === "JA_QUITADA"
-          ? "Cobrança já estava quitada"
-          : "Cobrança extra quitada antecipadamente",
-      parcelasQuitadas: resultado.parcelasQuitadas || 0,
+      mensagem: "Pagamento das parcelas confirmado",
+      parcelasPagas: resultado.parcelasPagas,
+      totalPago: valorEmReais(resultado.totalPagoCentavos),
     });
   } catch (erro) {
-    console.error("Erro ao quitar cobrança extra:", erro);
+    console.error("Erro ao confirmar parcelas extras:", erro);
 
     return res.status(500).json({
-      erro: "Erro interno ao quitar cobrança extra",
+      erro: "Erro interno ao confirmar parcelas extras",
     });
   }
 }
