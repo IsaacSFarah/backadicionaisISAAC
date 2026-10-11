@@ -10281,9 +10281,8 @@ await tx.pix_PagamentoCliente.update({
             dataPagamento: null,
           },
           data: {
-            dataPagamento: agora,
-            mensalidadeId: null,
-          },
+  dataPagamento: agora,
+},
         });
 
         if (atualizacao.count !== selecionadas.length) {
