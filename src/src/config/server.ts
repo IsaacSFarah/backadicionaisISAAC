@@ -10140,6 +10140,46 @@ async function cadastrarCobrancaExtra(req: any, res: any) {
   }
 }
 
+async function listarCobrancasExtrasAdmin(req: any, res: any) {
+  try {
+    const clienteId = req.query.clienteId;
+
+    if (
+      clienteId !== undefined &&
+      (typeof clienteId !== "string" || !clienteId.trim())
+    ) {
+      return res.status(400).json({
+        erro: "ID do cliente inválido",
+      });
+    }
+
+    const cobrancas = await prisma.pix_CobrancaExtra.findMany({
+      where: clienteId ? { clienteId } : {},
+      include: {
+        parcelas: {
+          orderBy: {
+            numeroParcela: "asc",
+          },
+        },
+      },
+      orderBy: {
+        dataCriacao: "desc",
+      },
+    });
+
+    return res.json({
+      sucesso: true,
+      cobrancas,
+    });
+  } catch (erro) {
+    console.error("Erro ao listar cobranças extras:", erro);
+
+    return res.status(500).json({
+      erro: "Erro interno ao listar cobranças extras",
+    });
+  }
+}
+
 async function quitarCobrancaExtra(req: any, res: any) {
   try {
     const { id } = req.params;
@@ -10337,7 +10377,7 @@ await tx.pix_PagamentoCliente.update({
       sucesso: true,
       mensagem: "Pagamento das parcelas confirmado",
       parcelasPagas: resultado.parcelasPagas,
-      totalPago: valorEmReais(resultado.totalPagoCentavos),
+      totalPago: valorEmReais(resultado.totalPagoCentavos ?? 0),
     });
   } catch (erro) {
     console.error("Erro ao confirmar parcelas extras:", erro);
@@ -10501,8 +10541,8 @@ async function cancelarCobrancaExtra(req: any, res: any) {
       mensagem: "Cobrança extra cancelada com sucesso",
       parcelasCanceladas: resultado.parcelasCanceladas,
       valorCancelado: valorEmReais(
-        resultado.valorCanceladoCentavos
-      ),
+  resultado.valorCanceladoCentavos ?? 0
+),
     });
   } catch (erro) {
     console.error("Erro ao cancelar cobrança extra:", erro);
