@@ -479,7 +479,9 @@ async function avisarMensalidadeCliente(
     SET "avisosEnviados" =
       "avisosEnviados" || ${JSON.stringify([dia])}::jsonb
     WHERE "id" = ${cobranca.id}
-      AND "status"::text IN ('ABERTO', 'VENCIDO')
+            AND "status"::text IN ('ABERTO', 'VENCIDO')
+      AND "valor" = ${cobranca.valor}
+      AND "valor"::numeric > 0
       AND NOT (
         "avisosEnviados" @> ${JSON.stringify([dia])}::jsonb
       )
