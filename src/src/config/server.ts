@@ -10348,6 +10348,171 @@ await tx.pix_PagamentoCliente.update({
     });
   }
 }
+async function cancelarCobrancaExtra(req: any, res: any) {
+  try {
+    const { id } = req.params;
+
+    if (typeof id !== "string" || !id.trim()) {
+      return res.status(400).json({
+        erro: "ID da cobrança extra inválido",
+      });
+    }
+
+    const resultado = await prisma.$transaction(
+      async (tx) => {
+        const referencia = await tx.pix_CobrancaExtra.findUnique({
+          where: { id },
+          select: { clienteId: true },
+        });
+
+        if (!referencia) {
+          return { tipo: "NAO_ENCONTRADA" };
+        }
+
+        // Impede alterações financeiras simultâneas do cliente.
+        await tx.$queryRaw`
+          SELECT "id"
+          FROM "Pix_Cliente"
+          WHERE "id" = ${referencia.clienteId}
+          FOR UPDATE
+        `;
+
+        const cobranca = await tx.pix_CobrancaExtra.findUnique({
+          where: { id },
+          include: {
+            parcelas: {
+              include: {
+                mensalidade: true,
+              },
+            },
+          },
+        });
+
+        if (!cobranca) {
+          return { tipo: "NAO_ENCONTRADA" };
+        }
+
+        if (cobranca.cancelada) {
+          return { tipo: "JA_CANCELADA" };
+        }
+
+        const pendentes = cobranca.parcelas.filter(
+          (parcela) => !parcela.dataPagamento
+        );
+
+        // Não altera mensalidades já finalizadas.
+        if (
+          pendentes.some(
+            (parcela) =>
+              parcela.mensalidade &&
+              !["ABERTO", "VENCIDO"].includes(
+                parcela.mensalidade.status
+              )
+          )
+        ) {
+          return { tipo: "MENSALIDADE_FECHADA" };
+        }
+
+        const descontos = new Map<string, number>();
+
+        for (const parcela of pendentes) {
+          if (!parcela.mensalidadeId) continue;
+
+          descontos.set(
+            parcela.mensalidadeId,
+            (descontos.get(parcela.mensalidadeId) || 0) +
+              parcela.valorCentavos
+          );
+        }
+
+        for (const [mensalidadeId, desconto] of descontos) {
+          const mensalidade = await tx.pix_PagamentoCliente.findUnique({
+            where: { id: mensalidadeId },
+          });
+
+          if (
+            !mensalidade ||
+            !["ABERTO", "VENCIDO"].includes(mensalidade.status)
+          ) {
+            return { tipo: "MENSALIDADE_FECHADA" };
+          }
+
+          const valorAtual = converterValorParaCentavos(
+            mensalidade.valor
+          );
+
+          if (valorAtual === null || valorAtual < desconto) {
+            throw new Error("VALOR_MENSALIDADE_INVALIDO");
+          }
+
+          const saldoRestante = valorAtual - desconto;
+
+          await tx.pix_PagamentoCliente.update({
+            where: { id: mensalidadeId },
+            data: {
+              valor: valorEmReais(saldoRestante),
+              status:
+                saldoRestante === 0
+                  ? "ENCERRADO_SEM_SALDO"
+                  : mensalidade.status,
+              avisosEnviados: [],
+            },
+          });
+        }
+
+        await tx.pix_CobrancaExtra.update({
+          where: { id },
+          data: { cancelada: true },
+        });
+
+        return {
+          tipo: "CANCELADA",
+          parcelasCanceladas: pendentes.length,
+          valorCanceladoCentavos: pendentes.reduce(
+            (total, parcela) => total + parcela.valorCentavos,
+            0
+          ),
+        };
+      },
+      { timeout: 15000 }
+    );
+
+    if (resultado.tipo === "NAO_ENCONTRADA") {
+      return res.status(404).json({
+        erro: "Cobrança extra não encontrada",
+      });
+    }
+
+    if (resultado.tipo === "JA_CANCELADA") {
+      return res.status(409).json({
+        erro: "Esta cobrança já foi cancelada",
+      });
+    }
+
+    if (resultado.tipo === "MENSALIDADE_FECHADA") {
+      return res.status(409).json({
+        erro:
+          "Não é possível cancelar parcelas vinculadas " +
+          "a mensalidades finalizadas",
+      });
+    }
+
+    return res.json({
+      sucesso: true,
+      mensagem: "Cobrança extra cancelada com sucesso",
+      parcelasCanceladas: resultado.parcelasCanceladas,
+      valorCancelado: valorEmReais(
+        resultado.valorCanceladoCentavos
+      ),
+    });
+  } catch (erro) {
+    console.error("Erro ao cancelar cobrança extra:", erro);
+
+    return res.status(500).json({
+      erro: "Erro interno ao cancelar cobrança extra",
+    });
+  }
+}
 
 // =====================================
 // IKPAY - ROTAS ADMINISTRATIVAS
@@ -10390,6 +10555,13 @@ app.patch(
   verifyJwtPessoa,
   verificarAdministradorAtivo,
   quitarCobrancaExtra
+);
+
+app.patch(
+  "/admin/cobrancas-extras/:id/cancelar",
+  verifyJwtPessoa,
+  verificarAdministradorAtivo,
+  cancelarCobrancaExtra
 );
 
 
