@@ -10140,50 +10140,172 @@ async function cadastrarCobrancaExtra(req: any, res: any) {
   }
 }
 
-async function listarCobrancasExtrasAdmin(req: any, res: any) {
+async function quitarCobrancaExtra(req: any, res: any) {
   try {
-    const { clienteId } = req.query;
+    const { id } = req.params;
 
-    if (
-      clienteId !== undefined &&
-      (typeof clienteId !== "string" || !clienteId.trim())
-    ) {
+    if (typeof id !== "string" || !id.trim()) {
       return res.status(400).json({
-        erro: "Cliente inválido",
+        erro: "ID da cobrança extra inválido",
       });
     }
 
-    const cobrancas = await prisma.pix_CobrancaExtra.findMany({
-      where: {
-        ...(clienteId ? { clienteId } : {}),
-      },
-      include: {
-        parcelas: {
-          orderBy: {
-            numeroParcela: "asc",
+    const resultado = await prisma.$transaction(
+      async (tx) => {
+        const referencia = await tx.pix_CobrancaExtra.findUnique({
+          where: { id },
+          select: { clienteId: true },
+        });
+
+        if (!referencia) {
+          return { tipo: "NAO_ENCONTRADA" };
+        }
+
+        await tx.$queryRaw`
+          SELECT "id"
+          FROM "Pix_Cliente"
+          WHERE "id" = ${referencia.clienteId}
+          FOR UPDATE
+        `;
+
+        const cobranca = await tx.pix_CobrancaExtra.findUnique({
+          where: { id },
+          include: {
+            parcelas: {
+              include: {
+                mensalidade: true,
+              },
+            },
           },
-        },
-        cliente: {
-          select: {
-            id: true,
-            nome: true,
+        });
+
+        if (!cobranca) {
+          return { tipo: "NAO_ENCONTRADA" };
+        }
+
+        if (cobranca.cancelada) {
+          return { tipo: "CANCELADA" };
+        }
+
+        const pendentes = cobranca.parcelas.filter(
+          (parcela) => !parcela.dataPagamento
+        );
+
+        if (pendentes.length === 0) {
+          return { tipo: "JA_QUITADA" };
+        }
+
+        // Impede alterações em mensalidades já finalizadas.
+        for (const parcela of pendentes) {
+          if (
+            parcela.mensalidade &&
+            !["ABERTO", "VENCIDO"].includes(
+              parcela.mensalidade.status
+            )
+          ) {
+            return { tipo: "MENSALIDADE_FECHADA" };
+          }
+        }
+
+        // Agrupa os valores a retirar de cada mensalidade.
+        const descontos = new Map<string, number>();
+
+        for (const parcela of pendentes) {
+          if (!parcela.mensalidadeId) continue;
+
+          descontos.set(
+            parcela.mensalidadeId,
+            (descontos.get(parcela.mensalidadeId) || 0) +
+              parcela.valorCentavos
+          );
+        }
+
+        for (const [mensalidadeId, desconto] of descontos) {
+          const mensalidade = await tx.pix_PagamentoCliente.findUnique({
+            where: { id: mensalidadeId },
+          });
+
+          if (
+            !mensalidade ||
+            !["ABERTO", "VENCIDO"].includes(mensalidade.status)
+          ) {
+            return { tipo: "MENSALIDADE_FECHADA" };
+          }
+
+          const valorAtual = converterValorParaCentavos(
+            mensalidade.valor
+          );
+
+          if (valorAtual === null || valorAtual < desconto) {
+            throw new Error("VALOR_MENSALIDADE_INVALIDO");
+          }
+
+          const novoValor = valorAtual - desconto;
+
+await tx.pix_PagamentoCliente.update({
+  where: { id: mensalidadeId },
+  data: {
+    valor: valorEmReais(novoValor),
+    avisosEnviados: [],
+    ...(novoValor === 0
+      ? { status: "SUBSTITUIDO" }
+      : {}),
+  },
+});
+        }
+
+        const agora = new Date();
+
+        await tx.pix_ParcelaExtra.updateMany({
+          where: {
+            cobrancaExtraId: id,
+            dataPagamento: null,
           },
-        },
+          data: {
+            dataPagamento: agora,
+            mensalidadeId: null,
+          },
+        });
+
+        return {
+          tipo: "QUITADA",
+          parcelasQuitadas: pendentes.length,
+        };
       },
-      orderBy: {
-        dataCriacao: "desc",
-      },
-    });
+      { timeout: 15000 }
+    );
+
+    if (resultado.tipo === "NAO_ENCONTRADA") {
+      return res.status(404).json({
+        erro: "Cobrança extra não encontrada",
+      });
+    }
+
+    if (resultado.tipo === "CANCELADA") {
+      return res.status(409).json({
+        erro: "Não é possível quitar uma cobrança cancelada",
+      });
+    }
+
+    if (resultado.tipo === "MENSALIDADE_FECHADA") {
+      return res.status(409).json({
+        erro: "Existem parcelas vinculadas a mensalidades finalizadas",
+      });
+    }
 
     return res.json({
       sucesso: true,
-      cobrancas,
+      mensagem:
+        resultado.tipo === "JA_QUITADA"
+          ? "Cobrança já estava quitada"
+          : "Cobrança extra quitada antecipadamente",
+      parcelasQuitadas: resultado.parcelasQuitadas || 0,
     });
   } catch (erro) {
-    console.error("Erro ao listar cobranças extras:", erro);
+    console.error("Erro ao quitar cobrança extra:", erro);
 
     return res.status(500).json({
-      erro: "Erro interno ao consultar cobranças extras",
+      erro: "Erro interno ao quitar cobrança extra",
     });
   }
 }
@@ -10222,6 +10344,13 @@ app.get(
   verifyJwtPessoa,
   verificarAdministradorAtivo,
   listarCobrancasExtrasAdmin
+);
+
+app.patch(
+  "/admin/cobrancas-extras/:id/quitar",
+  verifyJwtPessoa,
+  verificarAdministradorAtivo,
+  quitarCobrancaExtra
 );
 
 
