@@ -208,7 +208,7 @@ async function gerarMensalidadeDoMes(
             {
               mensalidade: {
                 status: {
-                  in: ["ABERTO", "VENCIDO", "SUBSTITUIDO"],
+                  in: ["ABERTO", "VENCIDO", "SUBSTITUIDO", "ENCERRADO_SEM_SALDO"],
                 },
               },
             },
