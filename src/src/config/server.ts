@@ -1831,6 +1831,19 @@ app.post("/new-cliente", async (req: any, res) => {
     const salt = await bcrypt.genSalt(10);
     const senhaHash = await bcrypt.hash(senha, salt);
 
+    // Buscar o ADM do banco de dados atual
+const adm = await prisma.pix_Pessoa.findFirst({
+  where: {
+    nome: "ADM",
+  },
+});
+
+if (!adm) {
+  return res.status(500).json({
+    error: "Administrador responsável não encontrado neste banco.",
+  });
+}
+
     // Criar o cliente
     const cliente = await prisma.pix_Cliente.create({
       data: {
@@ -1839,7 +1852,7 @@ app.post("/new-cliente", async (req: any, res) => {
         email: email.trim(),
         telefone: String(telefone).replace(/\D/g, ""),
         senha: senhaHash,
-        pessoaId: "92aa5921-f1c3-427f-9b26-7e1324e3f5fd",
+        pessoaId: adm.id,
         status: "ANALISE",
         cep: cep ? String(cep).replace(/\D/g, "") : null,
         endereco: endereco || null,
