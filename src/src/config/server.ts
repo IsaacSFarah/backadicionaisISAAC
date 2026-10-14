@@ -4081,11 +4081,13 @@ app.get("/clientes-analise", verifyJwtPessoa, async (req: any, res) => {
         pessoaId: req.userId,
         status: 'ANALISE'
       },
-      select: {
-        id: true,
-        nome: true,
-        email: true,
-        dataInclusao: true,
+     select: {
+  id: true,
+  nome: true,
+  cpf: true,
+  telefone: true,
+  email: true,
+  dataInclusao: true,
         ultimoAcesso: true,
         ativo: true,
         senha: false,
