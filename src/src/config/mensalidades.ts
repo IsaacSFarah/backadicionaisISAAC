@@ -101,82 +101,230 @@ async function calcularMensalidade(
 }
 
 // =====================================
-// GERAR MENSALIDADE DO MÊS
+// COBRANÇAS EXTRAS - AUXILIARES
+// =====================================
+
+function competenciaMensalidade(ano: number, mes: number): string {
+  return `${ano}-${String(mes).padStart(2, "0")}`;
+}
+
+function reaisParaCentavos(valor: string): number {
+  const texto = valor.trim();
+
+  if (!/^\d+(\.\d{1,2})?$/.test(texto)) {
+    throw new Error(`Valor monetário inválido: ${valor}`);
+  }
+
+  const [inteiros, decimais = ""] = texto.split(".");
+
+  const centavos =
+    Number(inteiros) * 100 +
+    Number(decimais.padEnd(2, "0"));
+
+  if (!Number.isSafeInteger(centavos)) {
+    throw new Error("Valor monetário fora do limite seguro");
+  }
+
+  return centavos;
+}
+
+function centavosParaReais(centavos: number): string {
+  return (centavos / 100).toFixed(2);
+}
+
+
+// =====================================
+// ARQUIVAR MENSALIDADES ANTIGAS
 // =====================================
 async function gerarMensalidadeDoMes(
   clienteId: string,
   ano: number,
   mes: number
 ) {
-  const mensalidade = await calcularMensalidade(
-    clienteId,
-    ano,
-    mes
-  );
-
-  if (mensalidade.quantidadeMaquinas === 0) {
-    console.log(
-      `⏭️ Cliente ${clienteId}: sem máquinas elegíveis`
-    );
-
-    return {
-      gerada: false,
-      motivo: "SEM_COBRANCA",
-    };
-  }
+  const competencia = competenciaMensalidade(ano, mes);
 
   const vencimento = new Date(
     Date.UTC(ano, mes - 1, 15, 12, 0, 0)
   );
 
-  const cobranca = await prisma.pix_PagamentoCliente.upsert({
-    where: {
-      clienteId_dataDeVencimento: {
-        clienteId,
-        dataDeVencimento: vencimento,
-      },
-    },
-    create: {
-      clienteId,
-      dataDeVencimento: vencimento,
-      valor: mensalidade.valorTotal.toFixed(2),
-      status: "ABERTO",
-      diaPagamento: 15,
-      avisosEnviados: [],
-    },
-    update: {},
-  });
+  return prisma.$transaction(
+    async (tx) => {
+      // Bloqueia operações simultâneas do mesmo cliente.
+      await tx.$queryRaw`
+        SELECT "id"
+        FROM "Pix_Cliente"
+        WHERE "id" = ${clienteId}
+        FOR UPDATE
+      `;
 
-  return {
-    gerada: true,
-    cobranca,
-  };
-}
+      const cliente = await tx.pix_Cliente.findUnique({
+        where: { id: clienteId },
+        select: { ativo: true },
+      });
 
-// =====================================
-// ARQUIVAR MENSALIDADES ANTIGAS
-// =====================================
-async function limparMensalidadesAnteriores(
-  clienteId: string,
-  vencimentoAtual: Date
-) {
-  const resultado = await prisma.pix_PagamentoCliente.updateMany({
-    where: {
-      clienteId,
-      dataDeVencimento: {
-        lt: vencimentoAtual,
-      },
-      status: {
-        in: ["ABERTO", "VENCIDO"],
-      },
-    },
-    data: {
-      status: "SUBSTITUIDO",
-    },
-  });
+      if (!cliente?.ativo) {
+        return {
+          gerada: false,
+          motivo: "CLIENTE_INATIVO",
+        };
+      }
 
-  console.log(
-    `📁 Mensalidades antigas substituídas: ${resultado.count}`
+      const dataCorte = new Date(
+        Date.UTC(ano, mes - 1, 13, 12, 0, 0)
+      );
+
+      const quantidadeMaquinas = await tx.pix_Maquina.count({
+        where: {
+          clienteId,
+          bloqueadaMensalidade: false,
+          dataInclusao: {
+            lte: dataCorte,
+          },
+        },
+      });
+
+      const valorPorMaquinaCentavos =
+        quantidadeMaquinas >= 5 ? 2990 : 3500;
+
+      const totalMaquinasCentavos =
+        quantidadeMaquinas * valorPorMaquinaCentavos;
+
+      // Busca parcelas do mês e atrasadas ainda pendentes.
+      // Não inclui parcelas de mensalidades já pagas.
+      const parcelas = await tx.pix_ParcelaExtra.findMany({
+        where: {
+          competencia: {
+            lte: competencia,
+          },
+          dataPagamento: null,
+          cobrancaExtra: {
+            clienteId,
+            cancelada: false,
+          },
+          OR: [
+            {
+              mensalidadeId: null,
+            },
+            {
+              mensalidade: {
+                status: {
+                  in: ["ABERTO", "VENCIDO", "SUBSTITUIDO", "ENCERRADO_SEM_SALDO"],
+                },
+              },
+            },
+          ],
+        },
+        select: {
+          id: true,
+          valorCentavos: true,
+          mensalidadeId: true,
+          competencia: true,
+        },
+      });
+
+      const totalExtrasCentavos = parcelas.reduce(
+        (total, parcela) => total + parcela.valorCentavos,
+        0
+      );
+
+      const totalCentavos =
+        totalMaquinasCentavos + totalExtrasCentavos;
+
+      const existente = await tx.pix_PagamentoCliente.findUnique({
+        where: {
+          clienteId_dataDeVencimento: {
+            clienteId,
+            dataDeVencimento: vencimento,
+          },
+        },
+        select: {
+          id: true,
+          status: true,
+          valor: true,
+        },
+      });
+
+      // Nunca altera uma mensalidade já finalizada.
+      if (
+        existente &&
+        !["ABERTO", "VENCIDO"].includes(existente.status)
+      ) {
+        return {
+          gerada: true,
+          cobranca: existente,
+        };
+      }
+
+      if (totalCentavos === 0) {
+        return {
+          gerada: false,
+          motivo: "SEM_COBRANCA",
+        };
+      }
+
+      const cobranca = await tx.pix_PagamentoCliente.upsert({
+        where: {
+          clienteId_dataDeVencimento: {
+            clienteId,
+            dataDeVencimento: vencimento,
+          },
+        },
+        create: {
+          clienteId,
+          dataDeVencimento: vencimento,
+          valor: centavosParaReais(totalCentavos),
+          status: "ABERTO",
+          diaPagamento: 15,
+          avisosEnviados: [],
+        },
+        update: {
+          valor: centavosParaReais(totalCentavos),
+        },
+      });
+
+      // Transfere o vínculo das parcelas pendentes.
+      if (parcelas.length > 0) {
+        await tx.pix_ParcelaExtra.updateMany({
+          where: {
+            id: {
+              in: parcelas.map((parcela) => parcela.id),
+            },
+            dataPagamento: null,
+          },
+          data: {
+            mensalidadeId: cobranca.id,
+          },
+        });
+      }
+
+      // Substitui mensalidades anteriores somente após
+      // transferir suas parcelas extras pendentes.
+      await tx.pix_PagamentoCliente.updateMany({
+        where: {
+          clienteId,
+          id: {
+            not: cobranca.id,
+          },
+          dataDeVencimento: {
+            lt: vencimento,
+          },
+          status: {
+            in: ["ABERTO", "VENCIDO"],
+          },
+        },
+        data: {
+          status: "SUBSTITUIDO",
+        },
+      });
+
+      return {
+        gerada: true,
+        cobranca,
+      };
+    },
+    {
+      timeout: 15000,
+    }
   );
 }
 
@@ -277,11 +425,13 @@ async function avisarMensalidadeCliente(
   });
 
   if (
-    !cobranca ||
-    !["ABERTO", "VENCIDO"].includes(cobranca.status)
-  ) {
-    return;
-  }
+  !cobranca ||
+  !["ABERTO", "VENCIDO"].includes(cobranca.status) ||
+  !Number.isFinite(Number(cobranca.valor)) ||
+  Number(cobranca.valor) <= 0
+) {
+  return;
+}
 
   const avisos = Array.isArray(cobranca.avisosEnviados)
     ? cobranca.avisosEnviados
@@ -329,7 +479,9 @@ async function avisarMensalidadeCliente(
     SET "avisosEnviados" =
       "avisosEnviados" || ${JSON.stringify([dia])}::jsonb
     WHERE "id" = ${cobranca.id}
-      AND "status"::text IN ('ABERTO', 'VENCIDO')
+            AND "status"::text IN ('ABERTO', 'VENCIDO')
+      AND "valor" = ${cobranca.valor}
+      AND "valor"::numeric > 0
       AND NOT (
         "avisosEnviados" @> ${JSON.stringify([dia])}::jsonb
       )
@@ -431,14 +583,9 @@ async function executarMensalidades() {
         continue;
       }
 
-      const vencimentoAtual = new Date(
-        Date.UTC(ano, mes - 1, 15, 12, 0, 0)
-      );
+      
 
-      await limparMensalidadesAnteriores(
-        cliente.id,
-        vencimentoAtual
-      );
+     
 
       console.log(
         `✅ Mensalidade registrada: ${cliente.nome}`

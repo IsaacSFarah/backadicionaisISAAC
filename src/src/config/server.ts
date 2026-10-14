@@ -1794,34 +1794,91 @@ app.post("/config", async (req, res) => {
 
 app.post("/new-cliente", async (req: any, res) => {
   try {
-    const { nome, email, senha } = req.body;
+    const {
+      nome,
+      cpf,
+      email,
+      telefone,
+      senha,
+      cep,
+      endereco,
+      numero,
+      bairro,
+      cidade,
+      uf,
+      complemento,
+    } = req.body;
 
-    // 1️⃣ Verificar se o e-mail já existe em Pix_Pessoa
+    // Verificar os dados obrigatórios
+    if (!nome || !cpf || !email || !telefone || !senha) {
+      return res.status(400).json({
+        error: "Preencha todos os campos obrigatórios.",
+      });
+    }
+
+    // Verificar se o e-mail já está cadastrado
     const pessoaExistente = await prisma.pix_Cliente.findUnique({
-      where: { email },
+      where: { email: email.trim() },
     });
 
     if (pessoaExistente) {
-      return res
-        .status(400)
-        .json({ error: "E-mail já cadastrado no sistema." });
+      return res.status(400).json({
+        error: "E-mail já cadastrado no sistema.",
+      });
     }
 
-    // 2️⃣ Criptografar senha
+    // Criptografar a senha
     const salt = await bcrypt.genSalt(10);
     const senhaHash = await bcrypt.hash(senha, salt);
 
-    req.body.pessoaId = 'd37ae2e9-ced6-432d-97f5-4e7da5c946fb';
-    req.body.senha = senhaHash;
+    // Buscar o ADM do banco de dados atual
+const adm = await prisma.pix_Pessoa.findFirst({
+  where: {
+    nome: "ADM",
+  },
+});
 
-    const cliente = await prisma.pix_Cliente.create({ data: req.body });
+if (!adm) {
+  return res.status(500).json({
+    error: "Administrador responsável não encontrado neste banco.",
+  });
+}
 
-    cliente.senha = senhaHash;
+    // Criar o cliente
+    const cliente = await prisma.pix_Cliente.create({
+      data: {
+        nome: nome.trim(),
+        cpf: String(cpf).replace(/\D/g, ""),
+        email: email.trim(),
+        telefone: String(telefone).replace(/\D/g, ""),
+        senha: senhaHash,
+        pessoaId: adm.id,
+        status: "ANALISE",
+        cep: cep ? String(cep).replace(/\D/g, "") : null,
+        endereco: endereco || null,
+        numero: numero ? String(numero) : null,
+        bairro: bairro || null,
+        cidade: cidade || null,
+        uf: uf || null,
+        complemento: complemento || null,
+      },
+      select: {
+        id: true,
+        nome: true,
+        cpf: true,
+        email: true,
+        telefone: true,
+        status: true,
+      },
+    });
 
-    return res.json(cliente);
+    return res.status(200).json(cliente);
   } catch (err: any) {
     console.error("Erro ao criar cliente:", err);
-    return res.status(500).json({ error: err.message });
+
+    return res.status(500).json({
+      error: "Erro interno ao realizar cadastro.",
+    });
   }
 });
 
@@ -4024,11 +4081,13 @@ app.get("/clientes-analise", verifyJwtPessoa, async (req: any, res) => {
         pessoaId: req.userId,
         status: 'ANALISE'
       },
-      select: {
-        id: true,
-        nome: true,
-        email: true,
-        dataInclusao: true,
+     select: {
+  id: true,
+  nome: true,
+  cpf: true,
+  telefone: true,
+  email: true,
+  dataInclusao: true,
         ultimoAcesso: true,
         ativo: true,
         senha: false,
@@ -4072,6 +4131,73 @@ app.get("/clientes-analise", verifyJwtPessoa, async (req: any, res) => {
   }
 });
 
+app.put("/clientes/:id/atualizar-cadastro", verifyJwtPessoa, async (req: any, res) => {
+  try {
+    const { id } = req.params;
+    const { cpf, telefone } = req.body;
+
+    const cliente = await prisma.pix_Cliente.findFirst({
+      where: {
+        id,
+        pessoaId: req.userId,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (!cliente) {
+      return res.status(404).json({
+        error: "Cliente não encontrado.",
+      });
+    }
+
+    const cpfLimpo = String(cpf ?? "").replace(/\D/g, "");
+    const telefoneLimpo = String(telefone ?? "").replace(/\D/g, "");
+
+    if (cpfLimpo && cpfLimpo.length !== 11) {
+      return res.status(400).json({
+        error: "CPF deve conter 11 dígitos.",
+      });
+    }
+
+    if (
+      telefoneLimpo &&
+      ![10, 11].includes(telefoneLimpo.length)
+    ) {
+      return res.status(400).json({
+        error: "Telefone inválido.",
+      });
+    }
+
+    const clienteAtualizado = await prisma.pix_Cliente.update({
+      where: {
+        id: cliente.id,
+      },
+      data: {
+        cpf: cpfLimpo || null,
+        telefone: telefoneLimpo || null,
+      },
+      select: {
+        id: true,
+        nome: true,
+        cpf: true,
+        telefone: true,
+      },
+    });
+
+    return res.status(200).json(clienteAtualizado);
+  } catch (err: any) {
+    console.error("Erro ao atualizar cadastro:", err);
+
+    return res.status(500).json({
+      error: "Erro ao atualizar cadastro do cliente.",
+    });
+  }
+});
+
+
+
 app.get("/clientes", verifyJwtPessoa, async (req: any, res) => {
   console.log(`${req.userId} acessou a rota que busca todos os clientes e suas máquinas.`);
   try {
@@ -4080,10 +4206,12 @@ app.get("/clientes", verifyJwtPessoa, async (req: any, res) => {
         pessoaId: req.userId,
       },
       select: {
-        id: true,
-        nome: true,
-        email: true,
-        dataInclusao: true,
+  id: true,
+  nome: true,
+  cpf: true,
+  telefone: true,
+  email: true,
+  dataInclusao: true,
         ultimoAcesso: true,
         ativo: true,
         senha: false,
@@ -9721,6 +9849,9 @@ async function verificarAdministradorAtivo(
 // =====================================
 // IKPAY - CONFIRMAR PAGAMENTO MENSALIDADE
 // =====================================
+// =====================================
+// IKPAY - CONFIRMAR PAGAMENTO MENSALIDADE
+// =====================================
 async function confirmarPagamentoMensalidade(req: any, res: any) {
   try {
     const { id } = req.params;
@@ -9731,56 +9862,821 @@ async function confirmarPagamentoMensalidade(req: any, res: any) {
       });
     }
 
-    const resultado = await prisma.pix_PagamentoCliente.updateMany({
-      where: {
-        id,
-        status: {
-          in: ["ABERTO", "VENCIDO"],
-        },
-      },
-      data: {
-        status: "PAGO",
-        dataDoPagamento: new Date(),
-      },
-    });
+    const resultado = await prisma.$transaction(
+      async (tx) => {
+        // Primeiro identifica o cliente da mensalidade.
+        const referencia = await tx.pix_PagamentoCliente.findUnique({
+          where: { id },
+          select: {
+            clienteId: true,
+          },
+        });
 
-    if (resultado.count === 0) {
-      const mensalidade = await prisma.pix_PagamentoCliente.findUnique({
-        where: { id },
-        select: {
-          id: true,
-          status: true,
-        },
+        if (!referencia) {
+          return {
+            tipo: "NAO_ENCONTRADA",
+          };
+        }
+
+        // Mesmo bloqueio usado no cadastro de extras
+        // e na geração automática das mensalidades.
+        await tx.$queryRaw`
+          SELECT "id"
+          FROM "Pix_Cliente"
+          WHERE "id" = ${referencia.clienteId}
+          FOR UPDATE
+        `;
+
+        // Confere novamente o status após obter o bloqueio.
+        const mensalidade = await tx.pix_PagamentoCliente.findUnique({
+          where: { id },
+          select: {
+            id: true,
+            status: true,
+          },
+        });
+
+        if (!mensalidade) {
+          return {
+            tipo: "NAO_ENCONTRADA",
+          };
+        }
+
+        if (mensalidade.status === "PAGO") {
+          return {
+            tipo: "JA_PAGA",
+          };
+        }
+
+        if (
+          !["ABERTO", "VENCIDO"].includes(mensalidade.status)
+        ) {
+          return {
+            tipo: "STATUS_INVALIDO",
+            status: mensalidade.status,
+          };
+        }
+
+        const agora = new Date();
+
+        const atualizacao = await tx.pix_PagamentoCliente.updateMany({
+          where: {
+            id,
+            status: {
+              in: ["ABERTO", "VENCIDO"],
+            },
+          },
+          data: {
+            status: "PAGO",
+            dataDoPagamento: agora,
+          },
+        });
+
+        if (atualizacao.count !== 1) {
+          throw new Error(
+            "Não foi possível confirmar a mensalidade"
+          );
+        }
+
+        // Confirma todas as parcelas extras vinculadas.
+        await tx.pix_ParcelaExtra.updateMany({
+          where: {
+            mensalidadeId: id,
+            dataPagamento: null,
+          },
+          data: {
+            dataPagamento: agora,
+          },
+        });
+
+        return {
+          tipo: "CONFIRMADA",
+        };
+      },
+      {
+        timeout: 15000,
+      }
+    );
+
+    if (resultado.tipo === "NAO_ENCONTRADA") {
+      return res.status(404).json({
+        erro: "Mensalidade não encontrada",
       });
+    }
 
-      if (!mensalidade) {
-        return res.status(404).json({
-          erro: "Mensalidade não encontrada",
-        });
-      }
+    if (resultado.tipo === "JA_PAGA") {
+      return res.json({
+        sucesso: true,
+        mensagem: "Mensalidade já estava paga",
+      });
+    }
 
-      if (mensalidade.status === "PAGO") {
-        return res.status(200).json({
-          sucesso: true,
-          mensagem: "Mensalidade já estava paga",
-        });
-      }
-
+    if (resultado.tipo === "STATUS_INVALIDO") {
       return res.status(409).json({
         erro: "Esta mensalidade não pode ser confirmada",
-        status: mensalidade.status,
+        status: resultado.status,
       });
     }
 
     return res.json({
       sucesso: true,
-      mensagem: "Pagamento confirmado com sucesso",
+      mensagem:
+        "Mensalidade e parcelas extras confirmadas com sucesso",
     });
   } catch (erro) {
-    console.error("Erro ao confirmar mensalidade:", erro);
+    console.error(
+      "Erro ao confirmar pagamento da mensalidade:",
+      erro
+    );
 
     return res.status(500).json({
       erro: "Erro interno ao confirmar pagamento",
+    });
+  }
+}
+
+// =====================================
+// COBRANÇAS EXTRAS - ADMINISTRADOR
+// =====================================
+
+function converterValorParaCentavos(valor: unknown): number | null {
+  if (typeof valor !== "string" && typeof valor !== "number") {
+    return null;
+  }
+
+  let texto = String(valor).trim().replace(/\s/g, "");
+
+  if (texto.includes(",") && texto.includes(".")) {
+    texto = texto.replace(/\./g, "").replace(",", ".");
+  } else {
+    texto = texto.replace(",", ".");
+  }
+
+  if (!/^\d+(\.\d{1,2})?$/.test(texto)) {
+    return null;
+  }
+
+  const [inteiros, decimais = ""] = texto.split(".");
+  const centavos =
+    Number(inteiros) * 100 +
+    Number(decimais.padEnd(2, "0"));
+
+  if (
+    !Number.isSafeInteger(centavos) ||
+    centavos <= 0 ||
+    centavos > 2147483647
+  ) {
+    return null;
+  }
+
+  return centavos;
+}
+
+function valorEmReais(centavos: number): string {
+  return (centavos / 100).toFixed(2);
+}
+
+function competenciaValida(valor: unknown): valor is string {
+  if (typeof valor !== "string") return false;
+
+  const resultado = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(valor);
+  if (!resultado) return false;
+
+  const ano = Number(resultado[1]);
+
+  return ano >= 2020 && ano <= 2100;
+}
+
+function adicionarMeses(competencia: string, meses: number): string {
+  const [ano, mes] = competencia.split("-").map(Number);
+
+  const data = new Date(Date.UTC(ano, mes - 1 + meses, 1));
+
+  return (
+    `${data.getUTCFullYear()}-` +
+    `${String(data.getUTCMonth() + 1).padStart(2, "0")}`
+  );
+}
+
+function vencimentoDaCompetencia(competencia: string): Date {
+  const [ano, mes] = competencia.split("-").map(Number);
+
+  return new Date(Date.UTC(ano, mes - 1, 15, 12, 0, 0));
+}
+
+async function cadastrarCobrancaExtra(req: any, res: any) {
+  try {
+    const {
+      clienteId,
+      descricao,
+      observacao,
+      valorTotal,
+      quantidadeParcelas,
+      primeiraCompetencia,
+    } = req.body || {};
+
+    const valorTotalCentavos =
+      converterValorParaCentavos(valorTotal);
+
+    if (
+      typeof clienteId !== "string" ||
+      !clienteId.trim() ||
+      typeof descricao !== "string" ||
+      !descricao.trim() ||
+      descricao.length > 300 ||
+      (observacao != null &&
+        (typeof observacao !== "string" ||
+          observacao.length > 2000)) ||
+      !valorTotalCentavos ||
+      !Number.isInteger(quantidadeParcelas) ||
+      quantidadeParcelas < 1 ||
+      quantidadeParcelas > 60 ||
+      valorTotalCentavos < quantidadeParcelas ||
+      !competenciaValida(primeiraCompetencia)
+    ) {
+      return res.status(400).json({
+        erro: "Dados da cobrança extra inválidos",
+      });
+    }
+
+    const cliente = await prisma.pix_Cliente.findUnique({
+      where: { id: clienteId },
+      select: { id: true },
+    });
+
+    if (!cliente) {
+      return res.status(404).json({
+        erro: "Cliente não encontrado",
+      });
+    }
+
+    const base = Math.floor(
+      valorTotalCentavos / quantidadeParcelas
+    );
+
+    const resto = valorTotalCentavos % quantidadeParcelas;
+
+    const parcelas = Array.from(
+      { length: quantidadeParcelas },
+      (_, indice) => ({
+        numeroParcela: indice + 1,
+        valorCentavos:
+          base + (indice === quantidadeParcelas - 1 ? resto : 0),
+        competencia: adicionarMeses(
+          primeiraCompetencia,
+          indice
+        ),
+      })
+    );
+
+    const resultado = await prisma.$transaction(
+      async (tx) => {
+        // Serializa cadastros simultâneos para o mesmo cliente.
+        await tx.$queryRaw`
+          SELECT "id"
+          FROM "Pix_Cliente"
+          WHERE "id" = ${clienteId}
+          FOR UPDATE
+        `;
+
+        // Não permite adicionar parcelas em competências
+        // cuja mensalidade já foi paga ou substituída.
+        for (const parcela of parcelas) {
+          const vencimento = vencimentoDaCompetencia(
+            parcela.competencia
+          );
+
+          const mensalidade =
+            await tx.pix_PagamentoCliente.findUnique({
+              where: {
+                clienteId_dataDeVencimento: {
+                  clienteId,
+                  dataDeVencimento: vencimento,
+                },
+              },
+              select: {
+                id: true,
+                status: true,
+              },
+            });
+
+          if (
+            mensalidade &&
+            !["ABERTO", "VENCIDO"].includes(mensalidade.status)
+          ) {
+            throw new Error(
+              `COMPETENCIA_FECHADA:${parcela.competencia}`
+            );
+          }
+        }
+
+        const cobranca = await tx.pix_CobrancaExtra.create({
+          data: {
+            clienteId,
+            descricao: descricao.trim(),
+            observacao: observacao?.trim() || null,
+            valorTotalCentavos,
+            quantidadeParcelas,
+            parcelas: {
+              create: parcelas,
+            },
+          },
+          include: {
+            parcelas: true,
+          },
+        });
+
+        // Inclui automaticamente as parcelas quando
+        // a mensalidade correspondente já existe.
+        for (const parcela of cobranca.parcelas) {
+          const vencimento = vencimentoDaCompetencia(
+            parcela.competencia
+          );
+
+          const mensalidade =
+            await tx.pix_PagamentoCliente.findUnique({
+              where: {
+                clienteId_dataDeVencimento: {
+                  clienteId,
+                  dataDeVencimento: vencimento,
+                },
+              },
+              select: {
+                id: true,
+                valor: true,
+                status: true,
+              },
+            });
+
+          if (!mensalidade) continue;
+
+          const valorAtual =
+            converterValorParaCentavos(mensalidade.valor);
+
+          if (valorAtual === null) {
+            throw new Error("VALOR_MENSALIDADE_INVALIDO");
+          }
+
+          const novoValor =
+            valorAtual + parcela.valorCentavos;
+
+          await tx.pix_PagamentoCliente.update({
+            where: { id: mensalidade.id },
+            data: {
+              valor: valorEmReais(novoValor),
+              avisosEnviados: [],
+            },
+          });
+
+          await tx.pix_ParcelaExtra.update({
+            where: { id: parcela.id },
+            data: {
+              mensalidadeId: mensalidade.id,
+            },
+          });
+        }
+
+        return cobranca;
+      },
+      {
+        timeout: 15000,
+      }
+    );
+
+    return res.status(201).json({
+      sucesso: true,
+      mensagem: "Cobrança extra cadastrada com sucesso",
+      cobranca: resultado,
+    });
+  } catch (erro: any) {
+    if (
+      typeof erro?.message === "string" &&
+      erro.message.startsWith("COMPETENCIA_FECHADA:")
+    ) {
+      return res.status(409).json({
+        erro:
+          "Uma das competências já possui mensalidade paga " +
+          "ou substituída. Escolha outro mês.",
+      });
+    }
+
+    console.error("Erro ao cadastrar cobrança extra:", erro);
+
+    return res.status(500).json({
+      erro: "Erro interno ao cadastrar cobrança extra",
+    });
+  }
+}
+
+async function listarCobrancasExtrasAdmin(req: any, res: any) {
+  try {
+    const clienteId = req.query.clienteId;
+
+    if (
+      clienteId !== undefined &&
+      (typeof clienteId !== "string" || !clienteId.trim())
+    ) {
+      return res.status(400).json({
+        erro: "ID do cliente inválido",
+      });
+    }
+
+    const cobrancas = await prisma.pix_CobrancaExtra.findMany({
+      where: clienteId ? { clienteId } : {},
+      include: {
+        parcelas: {
+          orderBy: {
+            numeroParcela: "asc",
+          },
+        },
+      },
+      orderBy: {
+        dataCriacao: "desc",
+      },
+    });
+
+    return res.json({
+      sucesso: true,
+      cobrancas,
+    });
+  } catch (erro) {
+    console.error("Erro ao listar cobranças extras:", erro);
+
+    return res.status(500).json({
+      erro: "Erro interno ao listar cobranças extras",
+    });
+  }
+}
+
+async function quitarCobrancaExtra(req: any, res: any) {
+  try {
+    const { id } = req.params;
+    const { parcelasIds } = req.body || {};
+
+    if (
+      typeof id !== "string" ||
+      !id.trim() ||
+      !Array.isArray(parcelasIds) ||
+      parcelasIds.length === 0 ||
+      parcelasIds.length > 60 ||
+      parcelasIds.some(
+        (parcelaId: any) =>
+          typeof parcelaId !== "string" || !parcelaId.trim()
+      ) ||
+      new Set(parcelasIds).size !== parcelasIds.length
+    ) {
+      return res.status(400).json({
+        erro: "Selecione parcelas válidas para confirmar",
+      });
+    }
+
+    const resultado = await prisma.$transaction(
+      async (tx) => {
+        const referencia = await tx.pix_CobrancaExtra.findUnique({
+          where: { id },
+          select: { clienteId: true },
+        });
+
+        if (!referencia) {
+          return { tipo: "NAO_ENCONTRADA" };
+        }
+
+        await tx.$queryRaw`
+          SELECT "id"
+          FROM "Pix_Cliente"
+          WHERE "id" = ${referencia.clienteId}
+          FOR UPDATE
+        `;
+
+        const cobranca = await tx.pix_CobrancaExtra.findUnique({
+          where: { id },
+          include: {
+            parcelas: {
+              include: {
+                mensalidade: true,
+              },
+            },
+          },
+        });
+
+        if (!cobranca) {
+          return { tipo: "NAO_ENCONTRADA" };
+        }
+
+        if (cobranca.cancelada) {
+          return { tipo: "CANCELADA" };
+        }
+
+        const selecionadas = cobranca.parcelas.filter(
+          (parcela) => parcelasIds.includes(parcela.id)
+        );
+
+        if (selecionadas.length !== parcelasIds.length) {
+          return { tipo: "PARCELAS_INVALIDAS" };
+        }
+
+        if (
+          selecionadas.some((parcela) => !!parcela.dataPagamento)
+        ) {
+          return { tipo: "PARCELA_JA_PAGA" };
+        }
+
+        if (
+          selecionadas.some(
+            (parcela) =>
+              parcela.mensalidade &&
+              !["ABERTO", "VENCIDO"].includes(
+                parcela.mensalidade.status
+              )
+          )
+        ) {
+          return { tipo: "MENSALIDADE_FECHADA" };
+        }
+
+        const descontos = new Map<string, number>();
+
+        for (const parcela of selecionadas) {
+          if (!parcela.mensalidadeId) continue;
+
+          descontos.set(
+            parcela.mensalidadeId,
+            (descontos.get(parcela.mensalidadeId) || 0) +
+              parcela.valorCentavos
+          );
+        }
+
+        for (const [mensalidadeId, desconto] of descontos) {
+          const mensalidade = await tx.pix_PagamentoCliente.findUnique({
+            where: { id: mensalidadeId },
+          });
+
+          if (
+            !mensalidade ||
+            !["ABERTO", "VENCIDO"].includes(mensalidade.status)
+          ) {
+            return { tipo: "MENSALIDADE_FECHADA" };
+          }
+
+          const valorAtual = converterValorParaCentavos(
+            mensalidade.valor
+          );
+
+          if (valorAtual === null || valorAtual < desconto) {
+            throw new Error("VALOR_MENSALIDADE_INVALIDO");
+          }
+
+          const saldoRestante = valorAtual - desconto;
+
+await tx.pix_PagamentoCliente.update({
+  where: { id: mensalidadeId },
+  data: {
+    valor: valorEmReais(saldoRestante),
+    status:
+      saldoRestante === 0
+        ? "ENCERRADO_SEM_SALDO"
+        : mensalidade.status,
+    avisosEnviados: [],
+  },
+});
+        }
+
+        const agora = new Date();
+
+        const atualizacao = await tx.pix_ParcelaExtra.updateMany({
+          where: {
+            cobrancaExtraId: id,
+            id: { in: parcelasIds },
+            dataPagamento: null,
+          },
+          data: {
+  dataPagamento: agora,
+},
+        });
+
+        if (atualizacao.count !== selecionadas.length) {
+          throw new Error("PARCELAS_NAO_ATUALIZADAS");
+        }
+
+        const totalPagoCentavos = selecionadas.reduce(
+          (total, parcela) => total + parcela.valorCentavos,
+          0
+        );
+
+        return {
+          tipo: "CONFIRMADA",
+          parcelasPagas: selecionadas.length,
+          totalPagoCentavos,
+        };
+      },
+      { timeout: 15000 }
+    );
+
+    if (resultado.tipo === "NAO_ENCONTRADA") {
+      return res.status(404).json({
+        erro: "Cobrança extra não encontrada",
+      });
+    }
+
+    if (resultado.tipo === "CANCELADA") {
+      return res.status(409).json({
+        erro: "Esta cobrança foi cancelada",
+      });
+    }
+
+    if (resultado.tipo === "PARCELAS_INVALIDAS") {
+      return res.status(400).json({
+        erro: "Uma ou mais parcelas não pertencem à cobrança",
+      });
+    }
+
+    if (resultado.tipo === "PARCELA_JA_PAGA") {
+      return res.status(409).json({
+        erro: "Uma das parcelas selecionadas já foi paga",
+      });
+    }
+
+    if (resultado.tipo === "MENSALIDADE_FECHADA") {
+      return res.status(409).json({
+        erro: "Uma das parcelas pertence a uma mensalidade finalizada",
+      });
+    }
+
+    return res.json({
+      sucesso: true,
+      mensagem: "Pagamento das parcelas confirmado",
+      parcelasPagas: resultado.parcelasPagas,
+      totalPago: valorEmReais(resultado.totalPagoCentavos ?? 0),
+    });
+  } catch (erro) {
+    console.error("Erro ao confirmar parcelas extras:", erro);
+
+    return res.status(500).json({
+      erro: "Erro interno ao confirmar parcelas extras",
+    });
+  }
+}
+async function cancelarCobrancaExtra(req: any, res: any) {
+  try {
+    const { id } = req.params;
+
+    if (typeof id !== "string" || !id.trim()) {
+      return res.status(400).json({
+        erro: "ID da cobrança extra inválido",
+      });
+    }
+
+    const resultado = await prisma.$transaction(
+      async (tx) => {
+        const referencia = await tx.pix_CobrancaExtra.findUnique({
+          where: { id },
+          select: { clienteId: true },
+        });
+
+        if (!referencia) {
+          return { tipo: "NAO_ENCONTRADA" };
+        }
+
+        // Impede alterações financeiras simultâneas do cliente.
+        await tx.$queryRaw`
+          SELECT "id"
+          FROM "Pix_Cliente"
+          WHERE "id" = ${referencia.clienteId}
+          FOR UPDATE
+        `;
+
+        const cobranca = await tx.pix_CobrancaExtra.findUnique({
+          where: { id },
+          include: {
+            parcelas: {
+              include: {
+                mensalidade: true,
+              },
+            },
+          },
+        });
+
+        if (!cobranca) {
+          return { tipo: "NAO_ENCONTRADA" };
+        }
+
+        if (cobranca.cancelada) {
+          return { tipo: "JA_CANCELADA" };
+        }
+
+        const pendentes = cobranca.parcelas.filter(
+          (parcela) => !parcela.dataPagamento
+        );
+
+        // Não altera mensalidades já finalizadas.
+        if (
+          pendentes.some(
+            (parcela) =>
+              parcela.mensalidade &&
+              !["ABERTO", "VENCIDO"].includes(
+                parcela.mensalidade.status
+              )
+          )
+        ) {
+          return { tipo: "MENSALIDADE_FECHADA" };
+        }
+
+        const descontos = new Map<string, number>();
+
+        for (const parcela of pendentes) {
+          if (!parcela.mensalidadeId) continue;
+
+          descontos.set(
+            parcela.mensalidadeId,
+            (descontos.get(parcela.mensalidadeId) || 0) +
+              parcela.valorCentavos
+          );
+        }
+
+        for (const [mensalidadeId, desconto] of descontos) {
+          const mensalidade = await tx.pix_PagamentoCliente.findUnique({
+            where: { id: mensalidadeId },
+          });
+
+          if (
+            !mensalidade ||
+            !["ABERTO", "VENCIDO"].includes(mensalidade.status)
+          ) {
+            return { tipo: "MENSALIDADE_FECHADA" };
+          }
+
+          const valorAtual = converterValorParaCentavos(
+            mensalidade.valor
+          );
+
+          if (valorAtual === null || valorAtual < desconto) {
+            throw new Error("VALOR_MENSALIDADE_INVALIDO");
+          }
+
+          const saldoRestante = valorAtual - desconto;
+
+          await tx.pix_PagamentoCliente.update({
+            where: { id: mensalidadeId },
+            data: {
+              valor: valorEmReais(saldoRestante),
+              status:
+                saldoRestante === 0
+                  ? "ENCERRADO_SEM_SALDO"
+                  : mensalidade.status,
+              avisosEnviados: [],
+            },
+          });
+        }
+
+        await tx.pix_CobrancaExtra.update({
+          where: { id },
+          data: { cancelada: true },
+        });
+
+        return {
+          tipo: "CANCELADA",
+          parcelasCanceladas: pendentes.length,
+          valorCanceladoCentavos: pendentes.reduce(
+            (total, parcela) => total + parcela.valorCentavos,
+            0
+          ),
+        };
+      },
+      { timeout: 15000 }
+    );
+
+    if (resultado.tipo === "NAO_ENCONTRADA") {
+      return res.status(404).json({
+        erro: "Cobrança extra não encontrada",
+      });
+    }
+
+    if (resultado.tipo === "JA_CANCELADA") {
+      return res.status(409).json({
+        erro: "Esta cobrança já foi cancelada",
+      });
+    }
+
+    if (resultado.tipo === "MENSALIDADE_FECHADA") {
+      return res.status(409).json({
+        erro:
+          "Não é possível cancelar parcelas vinculadas " +
+          "a mensalidades finalizadas",
+      });
+    }
+
+    return res.json({
+      sucesso: true,
+      mensagem: "Cobrança extra cancelada com sucesso",
+      parcelasCanceladas: resultado.parcelasCanceladas,
+      valorCancelado: valorEmReais(
+  resultado.valorCanceladoCentavos ?? 0
+),
+    });
+  } catch (erro) {
+    console.error("Erro ao cancelar cobrança extra:", erro);
+
+    return res.status(500).json({
+      erro: "Erro interno ao cancelar cobrança extra",
     });
   }
 }
@@ -9800,6 +10696,39 @@ app.patch(
   verifyJwtPessoa,
   verificarAdministradorAtivo,
   confirmarPagamentoMensalidade
+);
+
+
+// =====================================
+// ROTAS ADMIN - COBRANÇAS EXTRAS
+// =====================================
+
+app.post(
+  "/admin/cobrancas-extras",
+  verifyJwtPessoa,
+  verificarAdministradorAtivo,
+  cadastrarCobrancaExtra
+);
+
+app.get(
+  "/admin/cobrancas-extras",
+  verifyJwtPessoa,
+  verificarAdministradorAtivo,
+  listarCobrancasExtrasAdmin
+);
+
+app.patch(
+  "/admin/cobrancas-extras/:id/quitar",
+  verifyJwtPessoa,
+  verificarAdministradorAtivo,
+  quitarCobrancaExtra
+);
+
+app.patch(
+  "/admin/cobrancas-extras/:id/cancelar",
+  verifyJwtPessoa,
+  verificarAdministradorAtivo,
+  cancelarCobrancaExtra
 );
 
 
