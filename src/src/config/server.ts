@@ -4131,6 +4131,73 @@ app.get("/clientes-analise", verifyJwtPessoa, async (req: any, res) => {
   }
 });
 
+app.put("/clientes/:id/atualizar-cadastro", verifyJwtPessoa, async (req: any, res) => {
+  try {
+    const { id } = req.params;
+    const { cpf, telefone } = req.body;
+
+    const cliente = await prisma.pix_Cliente.findFirst({
+      where: {
+        id,
+        pessoaId: req.userId,
+      },
+      select: {
+        id: true,
+      },
+    });
+
+    if (!cliente) {
+      return res.status(404).json({
+        error: "Cliente não encontrado.",
+      });
+    }
+
+    const cpfLimpo = String(cpf ?? "").replace(/\D/g, "");
+    const telefoneLimpo = String(telefone ?? "").replace(/\D/g, "");
+
+    if (cpfLimpo && cpfLimpo.length !== 11) {
+      return res.status(400).json({
+        error: "CPF deve conter 11 dígitos.",
+      });
+    }
+
+    if (
+      telefoneLimpo &&
+      ![10, 11].includes(telefoneLimpo.length)
+    ) {
+      return res.status(400).json({
+        error: "Telefone inválido.",
+      });
+    }
+
+    const clienteAtualizado = await prisma.pix_Cliente.update({
+      where: {
+        id: cliente.id,
+      },
+      data: {
+        cpf: cpfLimpo || null,
+        telefone: telefoneLimpo || null,
+      },
+      select: {
+        id: true,
+        nome: true,
+        cpf: true,
+        telefone: true,
+      },
+    });
+
+    return res.status(200).json(clienteAtualizado);
+  } catch (err: any) {
+    console.error("Erro ao atualizar cadastro:", err);
+
+    return res.status(500).json({
+      error: "Erro ao atualizar cadastro do cliente.",
+    });
+  }
+});
+
+
+
 app.get("/clientes", verifyJwtPessoa, async (req: any, res) => {
   console.log(`${req.userId} acessou a rota que busca todos os clientes e suas máquinas.`);
   try {
