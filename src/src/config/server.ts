@@ -1794,34 +1794,78 @@ app.post("/config", async (req, res) => {
 
 app.post("/new-cliente", async (req: any, res) => {
   try {
-    const { nome, email, senha } = req.body;
+    const {
+      nome,
+      cpf,
+      email,
+      telefone,
+      senha,
+      cep,
+      endereco,
+      numero,
+      bairro,
+      cidade,
+      uf,
+      complemento,
+    } = req.body;
 
-    // 1️⃣ Verificar se o e-mail já existe em Pix_Pessoa
+    // Verificar os dados obrigatórios
+    if (!nome || !cpf || !email || !telefone || !senha) {
+      return res.status(400).json({
+        error: "Preencha todos os campos obrigatórios.",
+      });
+    }
+
+    // Verificar se o e-mail já está cadastrado
     const pessoaExistente = await prisma.pix_Cliente.findUnique({
-      where: { email },
+      where: { email: email.trim() },
     });
 
     if (pessoaExistente) {
-      return res
-        .status(400)
-        .json({ error: "E-mail já cadastrado no sistema." });
+      return res.status(400).json({
+        error: "E-mail já cadastrado no sistema.",
+      });
     }
 
-    // 2️⃣ Criptografar senha
+    // Criptografar a senha
     const salt = await bcrypt.genSalt(10);
     const senhaHash = await bcrypt.hash(senha, salt);
 
-    req.body.pessoaId = 'd37ae2e9-ced6-432d-97f5-4e7da5c946fb';
-    req.body.senha = senhaHash;
+    // Criar o cliente
+    const cliente = await prisma.pix_Cliente.create({
+      data: {
+        nome: nome.trim(),
+        cpf: String(cpf).replace(/\D/g, ""),
+        email: email.trim(),
+        telefone: String(telefone).replace(/\D/g, ""),
+        senha: senhaHash,
+        pessoaId: "d37ae2e9-ced6-432d-97f5-4e7da5c946fb",
+        status: "ANALISE",
+        cep: cep ? String(cep).replace(/\D/g, "") : null,
+        endereco: endereco || null,
+        numero: numero ? String(numero) : null,
+        bairro: bairro || null,
+        cidade: cidade || null,
+        uf: uf || null,
+        complemento: complemento || null,
+      },
+      select: {
+        id: true,
+        nome: true,
+        cpf: true,
+        email: true,
+        telefone: true,
+        status: true,
+      },
+    });
 
-    const cliente = await prisma.pix_Cliente.create({ data: req.body });
-
-    cliente.senha = senhaHash;
-
-    return res.json(cliente);
+    return res.status(200).json(cliente);
   } catch (err: any) {
     console.error("Erro ao criar cliente:", err);
-    return res.status(500).json({ error: err.message });
+
+    return res.status(500).json({
+      error: "Erro interno ao realizar cadastro.",
+    });
   }
 });
 
