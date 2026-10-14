@@ -1839,7 +1839,7 @@ app.post("/new-cliente", async (req: any, res) => {
         email: email.trim(),
         telefone: String(telefone).replace(/\D/g, ""),
         senha: senhaHash,
-        pessoaId: "d37ae2e9-ced6-432d-97f5-4e7da5c946fb",
+        pessoaId: "92aa5921-f1c3-427f-9b26-7e1324e3f5fd",
         status: "ANALISE",
         cep: cep ? String(cep).replace(/\D/g, "") : null,
         endereco: endereco || null,
