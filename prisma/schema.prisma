@@ -47,6 +47,8 @@ model Pix_Pessoa {
 model Pix_Cliente {
   id                   String                 @id @default(uuid())
   nome                 String
+  cpf                  String?
+  telefone             String?
   email                String                 @unique
   senha                String
   mercadoPagoToken     String?
