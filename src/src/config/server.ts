@@ -37,11 +37,19 @@ if (firebaseServiceAccountJson && !admin.apps.length) {
   }
 }
 
+type TipoNotificacao =
+  | "MAQUINA_ON"
+  | "MAQUINA_OFF"
+  | "PAGAMENTO"
+  | "SAIDA_PRODUTO";
+
 async function enviarPushCliente(
   clienteId: string,
   titulo: string,
-  mensagem: string
-) {
+  mensagem: string,
+  tipo?: TipoNotificacao
+)
+ {
   try {
     if (!admin.apps.length) {
       console.log("⚠️ Firebase Admin não inicializado");
@@ -426,10 +434,11 @@ const estavaOffline =
 ) {
 
   await enviarPushCliente(
-    String(maquinaDebug.clienteId),
-    "Máquina Online 🟢",
-    `${maquinaDebug.nome || "Máquina"} ficou online`
-  );
+  String(maquinaDebug.clienteId),
+  "Máquina Online 🟢",
+  `${maquinaDebug.nome || "Máquina"} ficou online`,
+  "MAQUINA_ON"
+);
 } else {
   maquinasNotificadasOffline.delete(machineId);
 }
@@ -667,10 +676,11 @@ async function confirmarPendenciaWs(requestId: string, machineId: string, nivelD
                 : pagamentoConfirmado.tipo || "PAGAMENTO";
 
         await enviarPushCliente(
-          String(pagamentoConfirmado.clienteId),
-          "Pagamento recebido 💰",
-          `${pagamentoConfirmado.maquina.nome || "Máquina"} recebeu R$ ${valorFormatado} via ${tipoPagamento}`
-        );
+  String(pagamentoConfirmado.clienteId),
+  "Pagamento recebido 💰",
+  `${pagamentoConfirmado.maquina.nome || "Máquina"} recebeu R$ ${valorFormatado} via ${tipoPagamento}`,
+  "PAGAMENTO"
+);
       }
     }
   } catch (err) {
@@ -794,10 +804,11 @@ setInterval(async () => {
       }
 
       await enviarPushCliente(
-        String(maquina.clienteId),
-        "Máquina Offline 🔴",
-        `${maquina.nome || "Máquina"} ficou offline`
-      );
+  String(maquina.clienteId),
+  "Máquina Offline 🔴",
+  `${maquina.nome || "Máquina"} ficou offline`,
+  "MAQUINA_OFF"
+);
     }
   } catch (err) {
     console.error(
@@ -3099,10 +3110,11 @@ if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
                     : pagamentoConfirmado.tipo || "PAGAMENTO";
 
     await enviarPushCliente(
-      String(pagamentoConfirmado.clienteId),
-      "Pagamento recebido 💰",
-      `${pagamentoConfirmado.maquina.nome || "Máquina"} recebeu R$ ${valorFormatado} via ${tipoPagamento}`
-    );
+  String(pagamentoConfirmado.clienteId),
+  "Pagamento recebido 💰",
+  `${pagamentoConfirmado.maquina.nome || "Máquina"} recebeu R$ ${valorFormatado} via ${tipoPagamento}`,
+  "PAGAMENTO"
+);
   }
 }
 
@@ -5895,10 +5907,11 @@ app.post("/decrementar-estoque/:id/", async (req: any, res: any) => {
       );
 
       await enviarPushCliente(
-        String(maquina.clienteId),
-        "Saiu Produto 🎁",
-        `${maquina.nome || "Máquina"} liberou ${quantidade} produto(s) • Gerou R$ ${valorAcumulado.toFixed(2).replace(".", ",")}`
-      );
+  String(maquina.clienteId),
+  "Saiu Produto 🎁",
+  `${maquina.nome || "Máquina"} liberou ${quantidade} produto(s) • Gerou R$ ${valorAcumulado.toFixed(2).replace(".", ",")}`,
+  "SAIDA_PRODUTO"
+);
     }
 
     if (NOTIFICACOES_ESTOQUE) {
