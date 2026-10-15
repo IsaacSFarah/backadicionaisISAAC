@@ -8781,6 +8781,7 @@ app.get("/machines-client", verifyJWT, async (req: any, res) => {
   maquininha_serial: maquina.maquininha_serial || "",
   bonusAtivo: maquina.bonusAtivo,
   bonusRegras: maquina.bonusRegras,
+  bloqueadaMensalidade: maquina.bloqueadaMensalidade,
   clienteNome: maquina.cliente ? maquina.cliente.nome : "",
 };
 
