@@ -56,6 +56,36 @@ async function enviarPushCliente(
       return;
     }
 
+    // 🔔 Verificar preferências individuais do cliente
+if (tipo) {
+  const preferencias = await prisma.pix_Cliente.findUnique({
+    where: { id: clienteId },
+    select: {
+      notificarMaquinaOn: true,
+      notificarMaquinaOff: true,
+      notificarPagamentos: true,
+      notificarSaidaProduto: true,
+    },
+  });
+
+  if (!preferencias) {
+    console.log(`🔕 Cliente ${clienteId} não encontrado`);
+    return;
+  }
+
+  const permitido =
+    tipo === "MAQUINA_ON" ? preferencias.notificarMaquinaOn :
+    tipo === "MAQUINA_OFF" ? preferencias.notificarMaquinaOff :
+    tipo === "PAGAMENTO" ? preferencias.notificarPagamentos :
+    tipo === "SAIDA_PRODUTO" ? preferencias.notificarSaidaProduto :
+    true;
+
+  if (!permitido) {
+    console.log(`🔕 Notificação ${tipo} desativada pelo cliente ${clienteId}`);
+    return;
+  }
+}
+
     const registros = await prisma.pix_FcmToken.findMany({
       where: {
         clienteId: clienteId,
@@ -1987,6 +2017,102 @@ app.delete('/cliente/:id', verifyJwtPessoa, async (req, res) => {
   } catch (error) {
     console.error('Erro ao excluir o cliente:', error);
     res.status(500).json({ error: 'Erro ao excluir o cliente' });
+  }
+});
+
+// 🔔 CONSULTAR PREFERÊNCIAS DE NOTIFICAÇÕES DO CLIENTE
+app.get("/notificacoes/preferencias", verifyJWT, async (req: any, res) => {
+  try {
+    const clienteId = req.userId;
+
+    const preferencias = await prisma.pix_Cliente.findUnique({
+      where: { id: clienteId },
+      select: {
+        notificarMaquinaOn: true,
+        notificarMaquinaOff: true,
+        notificarPagamentos: true,
+        notificarSaidaProduto: true,
+      },
+    });
+
+    if (!preferencias) {
+      return res.status(404).json({
+        error: "Cliente não encontrado",
+      });
+    }
+
+    return res.status(200).json(preferencias);
+  } catch (error) {
+    console.error("Erro ao consultar preferências:", error);
+
+    return res.status(500).json({
+      error: "Erro ao consultar preferências de notificações",
+    });
+  }
+});
+
+// 🔔 SALVAR PREFERÊNCIAS DE NOTIFICAÇÕES DO CLIENTE
+app.put("/notificacoes/preferencias", verifyJWT, async (req: any, res) => {
+  try {
+    const clienteId = req.userId;
+
+    const campos = [
+      "notificarMaquinaOn",
+      "notificarMaquinaOff",
+      "notificarPagamentos",
+      "notificarSaidaProduto",
+    ] as const;
+
+    const data: Record<string, boolean> = {};
+
+    for (const campo of campos) {
+      const valor = req.body?.[campo];
+
+      if (valor !== undefined) {
+        if (typeof valor !== "boolean") {
+          return res.status(400).json({
+            error: `${campo} deve ser true ou false`,
+          });
+        }
+
+        data[campo] = valor;
+      }
+    }
+
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({
+        error: "Nenhuma preferência válida foi informada",
+      });
+    }
+
+    const resultado = await prisma.pix_Cliente.updateMany({
+      where: { id: clienteId },
+      data,
+    });
+
+    if (resultado.count === 0) {
+      return res.status(404).json({
+        error: "Cliente não encontrado",
+      });
+    }
+
+    const preferencias = await prisma.pix_Cliente.findUnique({
+      where: { id: clienteId },
+      select: {
+        notificarMaquinaOn: true,
+        notificarMaquinaOff: true,
+        notificarPagamentos: true,
+        notificarSaidaProduto: true,
+      },
+    });
+
+    return res.status(200).json(preferencias);
+  } catch (error) {
+    console.error("Erro ao salvar preferências:", error);
+
+    return res.status(500).json({
+      error: "Erro ao salvar preferências de notificações",
+    });
   }
 });
 
