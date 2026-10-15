@@ -4173,7 +4173,8 @@ app.get("/maquinas-adm", verifyJwtPessoa, async (req: any, res) => {
             pulso: maquina.valorDoPulso,
             nivelDeSinal: maquina.nivelDeSinal,
             bonusAtivo: maquina.bonusAtivo,
-            bonusRegras: maquina.bonusRegras
+            bonusRegras: maquina.bonusRegras,
+            bloqueadaMensalidade: maquina.bloqueadaMensalidade
           });
         } else {
           maquinasComStatus.push({
@@ -4193,7 +4194,8 @@ app.get("/maquinas-adm", verifyJwtPessoa, async (req: any, res) => {
             pulso: maquina.valorDoPulso,
             nivelDeSinal: maquina.nivelDeSinal,
             bonusAtivo: maquina.bonusAtivo,
-            bonusRegras: maquina.bonusRegras
+            bonusRegras: maquina.bonusRegras,
+            bloqueadaMensalidade: maquina.bloqueadaMensalidade
           });
         }
       }
