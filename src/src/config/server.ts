@@ -1874,8 +1874,8 @@ app.post("/new-cliente", async (req: any, res) => {
 
     // Buscar o ADM do banco de dados atual
 const adm = await prisma.pix_Pessoa.findFirst({
-  where: {
-    nome: "ADM",
+  select: {
+    id: true,
   },
 });
 
