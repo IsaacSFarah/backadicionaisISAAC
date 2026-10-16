@@ -37,16 +37,54 @@ if (firebaseServiceAccountJson && !admin.apps.length) {
   }
 }
 
+type TipoNotificacao =
+  | "MAQUINA_ON"
+  | "MAQUINA_OFF"
+  | "PAGAMENTO"
+  | "SAIDA_PRODUTO";
+
 async function enviarPushCliente(
   clienteId: string,
   titulo: string,
-  mensagem: string
-) {
+  mensagem: string,
+  tipo?: TipoNotificacao
+)
+ {
   try {
     if (!admin.apps.length) {
       console.log("⚠️ Firebase Admin não inicializado");
       return;
     }
+
+    // 🔔 Verificar preferências individuais do cliente
+if (tipo) {
+  const preferencias = await prisma.pix_Cliente.findUnique({
+    where: { id: clienteId },
+    select: {
+      notificarMaquinaOn: true,
+      notificarMaquinaOff: true,
+      notificarPagamentos: true,
+      notificarSaidaProduto: true,
+    },
+  });
+
+  if (!preferencias) {
+    console.log(`🔕 Cliente ${clienteId} não encontrado`);
+    return;
+  }
+
+  const permitido =
+    tipo === "MAQUINA_ON" ? preferencias.notificarMaquinaOn :
+    tipo === "MAQUINA_OFF" ? preferencias.notificarMaquinaOff :
+    tipo === "PAGAMENTO" ? preferencias.notificarPagamentos :
+    tipo === "SAIDA_PRODUTO" ? preferencias.notificarSaidaProduto :
+    true;
+
+  if (!permitido) {
+    console.log(`🔕 Notificação ${tipo} desativada pelo cliente ${clienteId}`);
+    return;
+  }
+}
 
     const registros = await prisma.pix_FcmToken.findMany({
       where: {
@@ -426,10 +464,11 @@ const estavaOffline =
 ) {
 
   await enviarPushCliente(
-    String(maquinaDebug.clienteId),
-    "Máquina Online 🟢",
-    `${maquinaDebug.nome || "Máquina"} ficou online`
-  );
+  String(maquinaDebug.clienteId),
+  "Máquina Online 🟢",
+  `${maquinaDebug.nome || "Máquina"} ficou online`,
+  "MAQUINA_ON"
+);
 } else {
   maquinasNotificadasOffline.delete(machineId);
 }
@@ -667,10 +706,11 @@ async function confirmarPendenciaWs(requestId: string, machineId: string, nivelD
                 : pagamentoConfirmado.tipo || "PAGAMENTO";
 
         await enviarPushCliente(
-          String(pagamentoConfirmado.clienteId),
-          "Pagamento recebido 💰",
-          `${pagamentoConfirmado.maquina.nome || "Máquina"} recebeu R$ ${valorFormatado} via ${tipoPagamento}`
-        );
+  String(pagamentoConfirmado.clienteId),
+  "Pagamento recebido 💰",
+  `${pagamentoConfirmado.maquina.nome || "Máquina"} recebeu R$ ${valorFormatado} via ${tipoPagamento}`,
+  "PAGAMENTO"
+);
       }
     }
   } catch (err) {
@@ -794,10 +834,11 @@ setInterval(async () => {
       }
 
       await enviarPushCliente(
-        String(maquina.clienteId),
-        "Máquina Offline 🔴",
-        `${maquina.nome || "Máquina"} ficou offline`
-      );
+  String(maquina.clienteId),
+  "Máquina Offline 🔴",
+  `${maquina.nome || "Máquina"} ficou offline`,
+  "MAQUINA_OFF"
+);
     }
   } catch (err) {
     console.error(
@@ -1833,8 +1874,8 @@ app.post("/new-cliente", async (req: any, res) => {
 
     // Buscar o ADM do banco de dados atual
 const adm = await prisma.pix_Pessoa.findFirst({
-  where: {
-    nome: "ADM",
+  select: {
+    id: true,
   },
 });
 
@@ -1976,6 +2017,102 @@ app.delete('/cliente/:id', verifyJwtPessoa, async (req, res) => {
   } catch (error) {
     console.error('Erro ao excluir o cliente:', error);
     res.status(500).json({ error: 'Erro ao excluir o cliente' });
+  }
+});
+
+// 🔔 CONSULTAR PREFERÊNCIAS DE NOTIFICAÇÕES DO CLIENTE
+app.get("/notificacoes/preferencias", verifyJWT, async (req: any, res) => {
+  try {
+    const clienteId = req.userId;
+
+    const preferencias = await prisma.pix_Cliente.findUnique({
+      where: { id: clienteId },
+      select: {
+        notificarMaquinaOn: true,
+        notificarMaquinaOff: true,
+        notificarPagamentos: true,
+        notificarSaidaProduto: true,
+      },
+    });
+
+    if (!preferencias) {
+      return res.status(404).json({
+        error: "Cliente não encontrado",
+      });
+    }
+
+    return res.status(200).json(preferencias);
+  } catch (error) {
+    console.error("Erro ao consultar preferências:", error);
+
+    return res.status(500).json({
+      error: "Erro ao consultar preferências de notificações",
+    });
+  }
+});
+
+// 🔔 SALVAR PREFERÊNCIAS DE NOTIFICAÇÕES DO CLIENTE
+app.put("/notificacoes/preferencias", verifyJWT, async (req: any, res) => {
+  try {
+    const clienteId = req.userId;
+
+    const campos = [
+      "notificarMaquinaOn",
+      "notificarMaquinaOff",
+      "notificarPagamentos",
+      "notificarSaidaProduto",
+    ] as const;
+
+    const data: Record<string, boolean> = {};
+
+    for (const campo of campos) {
+      const valor = req.body?.[campo];
+
+      if (valor !== undefined) {
+        if (typeof valor !== "boolean") {
+          return res.status(400).json({
+            error: `${campo} deve ser true ou false`,
+          });
+        }
+
+        data[campo] = valor;
+      }
+    }
+
+    if (Object.keys(data).length === 0) {
+      return res.status(400).json({
+        error: "Nenhuma preferência válida foi informada",
+      });
+    }
+
+    const resultado = await prisma.pix_Cliente.updateMany({
+      where: { id: clienteId },
+      data,
+    });
+
+    if (resultado.count === 0) {
+      return res.status(404).json({
+        error: "Cliente não encontrado",
+      });
+    }
+
+    const preferencias = await prisma.pix_Cliente.findUnique({
+      where: { id: clienteId },
+      select: {
+        notificarMaquinaOn: true,
+        notificarMaquinaOff: true,
+        notificarPagamentos: true,
+        notificarSaidaProduto: true,
+      },
+    });
+
+    return res.status(200).json(preferencias);
+  } catch (error) {
+    console.error("Erro ao salvar preferências:", error);
+
+    return res.status(500).json({
+      error: "Erro ao salvar preferências de notificações",
+    });
   }
 });
 
@@ -3099,10 +3236,11 @@ if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
                     : pagamentoConfirmado.tipo || "PAGAMENTO";
 
     await enviarPushCliente(
-      String(pagamentoConfirmado.clienteId),
-      "Pagamento recebido 💰",
-      `${pagamentoConfirmado.maquina.nome || "Máquina"} recebeu R$ ${valorFormatado} via ${tipoPagamento}`
-    );
+  String(pagamentoConfirmado.clienteId),
+  "Pagamento recebido 💰",
+  `${pagamentoConfirmado.maquina.nome || "Máquina"} recebeu R$ ${valorFormatado} via ${tipoPagamento}`,
+  "PAGAMENTO"
+);
   }
 }
 
@@ -4035,7 +4173,8 @@ app.get("/maquinas-adm", verifyJwtPessoa, async (req: any, res) => {
             pulso: maquina.valorDoPulso,
             nivelDeSinal: maquina.nivelDeSinal,
             bonusAtivo: maquina.bonusAtivo,
-            bonusRegras: maquina.bonusRegras
+            bonusRegras: maquina.bonusRegras,
+            bloqueadaMensalidade: maquina.bloqueadaMensalidade
           });
         } else {
           maquinasComStatus.push({
@@ -4055,7 +4194,8 @@ app.get("/maquinas-adm", verifyJwtPessoa, async (req: any, res) => {
             pulso: maquina.valorDoPulso,
             nivelDeSinal: maquina.nivelDeSinal,
             bonusAtivo: maquina.bonusAtivo,
-            bonusRegras: maquina.bonusRegras
+            bonusRegras: maquina.bonusRegras,
+            bloqueadaMensalidade: maquina.bloqueadaMensalidade
           });
         }
       }
@@ -4230,6 +4370,7 @@ app.get("/clientes", verifyJwtPessoa, async (req: any, res) => {
             ultimoPagamentoRecebido: true,
             ultimaRequisicao: true,
             maquininha_serial: true, // Adiciona maquininha_serial
+            bloqueadaMensalidade: true,
           },
         },
       },
@@ -5895,10 +6036,11 @@ app.post("/decrementar-estoque/:id/", async (req: any, res: any) => {
       );
 
       await enviarPushCliente(
-        String(maquina.clienteId),
-        "Saiu Produto 🎁",
-        `${maquina.nome || "Máquina"} liberou ${quantidade} produto(s) • Gerou R$ ${valorAcumulado.toFixed(2).replace(".", ",")}`
-      );
+  String(maquina.clienteId),
+  "Saiu Produto 🎁",
+  `${maquina.nome || "Máquina"} liberou ${quantidade} produto(s) • Gerou R$ ${valorAcumulado.toFixed(2).replace(".", ",")}`,
+  "SAIDA_PRODUTO"
+);
     }
 
     if (NOTIFICACOES_ESTOQUE) {
@@ -8642,6 +8784,7 @@ app.get("/machines-client", verifyJWT, async (req: any, res) => {
   maquininha_serial: maquina.maquininha_serial || "",
   bonusAtivo: maquina.bonusAtivo,
   bonusRegras: maquina.bonusRegras,
+  bloqueadaMensalidade: maquina.bloqueadaMensalidade,
   clienteNome: maquina.cliente ? maquina.cliente.nome : "",
 };
 
