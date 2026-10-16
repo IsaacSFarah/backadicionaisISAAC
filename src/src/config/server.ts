@@ -4370,6 +4370,7 @@ app.get("/clientes", verifyJwtPessoa, async (req: any, res) => {
             ultimoPagamentoRecebido: true,
             ultimaRequisicao: true,
             maquininha_serial: true, // Adiciona maquininha_serial
+            bloqueadaMensalidade: true,
           },
         },
       },
