@@ -329,7 +329,7 @@ const espWsPendentes = new Map<string, {
 }>();
 const espWsPendenciaPorMaquina = new Map<string, string>();
 const ESP_HEARTBEAT_WRITE_MS = 30000;
-const ESP_WS_ACK_TIMEOUT_MS = 5000;
+const ESP_WS_ACK_TIMEOUT_MS = 36000;
 const DASHBOARD_CACHE_TTL_MS = 30000;
 const DASHBOARD_CACHE_MAX_ITEMS = 500;
 let processandoPagamentosPendentes = false;
