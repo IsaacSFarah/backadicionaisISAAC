@@ -598,20 +598,26 @@ if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
     source: options?.source || "SERVER_PUSH",
   };
 
+
+    
+  const agora = Date.now();
+
+  // Registra a pendência ANTES de enviar o pulse.
+  espWsPendentes.set(requestId, {
+    requestId,
+    machineId,
+    pagamentoId: options?.pagamentoId,
+    valorDoPix: calculo.valorPixAtualStr,
+    pulsos: calculo.pulsosFormatados,
+    source: options?.source || "SERVER_PUSH",
+    createdAt: agora,
+    expiresAt: agora + ESP_WS_ACK_TIMEOUT_MS,
+  });
+
+  espWsPendenciaPorMaquina.set(machineId, requestId);
+
   try {
     conexao.socket.send(JSON.stringify(mensagem));
-    const agora = Date.now();
-    espWsPendentes.set(requestId, {
-      requestId,
-      machineId,
-      pagamentoId: options?.pagamentoId,
-      valorDoPix: calculo.valorPixAtualStr,
-      pulsos: calculo.pulsosFormatados,
-      source: options?.source || "SERVER_PUSH",
-      createdAt: agora,
-      expiresAt: agora + ESP_WS_ACK_TIMEOUT_MS,
-    });
-    espWsPendenciaPorMaquina.set(machineId, requestId);
 
     console.log(`
 📡 CRÉDITO ENVIADO VIA WS
@@ -632,12 +638,18 @@ if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
     console.error("Erro ao enviar crédito via WS:", err);
     limparSocketEsp(machineId, conexao.socket);
     removerPendenciaWs(requestId);
+
     try {
       conexao.socket.terminate();
     } catch { }
-    return { enviado: false, motivo: "ERRO_ENVIO_WS" as const };
+
+    return {
+      enviado: false,
+      motivo: "ERRO_ENVIO_WS" as const,
+    };
   }
 }
+
 
 async function confirmarPendenciaWs(requestId: string, machineId: string, nivelDeSinal?: number | null) {
   const pendencia = espWsPendentes.get(requestId);
