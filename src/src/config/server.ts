@@ -883,6 +883,15 @@ setInterval(() => {
 
 const wss = new WebSocketServer({ server: httpServer, path: "/ws/esp" });
 
+// Verificação periódica das conexões WebSocket
+setInterval(() => {
+  wss.clients.forEach((socket) => {
+    if (socket.readyState === WebSocket.OPEN) {
+      socket.ping();
+    }
+  });
+}, 30000);
+
 wss.on("connection", (socket, req) => {
   const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "");
 
