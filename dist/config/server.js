@@ -3,6 +3,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+const payment_pulses_1 = require("./payment-pulses");
+const stone_payments_1 = require("./stone-payments");
 const client_1 = require("@prisma/client");
 const express_1 = __importDefault(require("express"));
 const cors_1 = __importDefault(require("cors"));
@@ -17,8 +19,101 @@ const dotenv_1 = __importDefault(require("dotenv"));
 const http_1 = require("http");
 const crypto_1 = require("crypto");
 const ws_1 = require("ws");
+const firebase_admin_1 = __importDefault(require("firebase-admin"));
 // Configuração de variáveis de ambiente
 dotenv_1.default.config();
+const firebaseServiceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT;
+if (firebaseServiceAccountJson && !firebase_admin_1.default.apps.length) {
+    try {
+        const firebaseServiceAccount = JSON.parse(firebaseServiceAccountJson);
+        firebase_admin_1.default.initializeApp({
+            credential: firebase_admin_1.default.credential.cert(firebaseServiceAccount),
+        });
+        console.log("🔥 Firebase Admin inicializado com sucesso");
+    }
+    catch (error) {
+        console.error("❌ Erro ao inicializar Firebase Admin:", error);
+    }
+}
+async function enviarPushCliente(clienteId, titulo, mensagem, tipo) {
+    try {
+        if (!firebase_admin_1.default.apps.length) {
+            console.log("⚠️ Firebase Admin não inicializado");
+            return;
+        }
+        // 🔔 Verificar preferências individuais do cliente
+        if (tipo) {
+            const preferencias = await prisma.pix_Cliente.findUnique({
+                where: { id: clienteId },
+                select: {
+                    notificarMaquinaOn: true,
+                    notificarMaquinaOff: true,
+                    notificarPagamentos: true,
+                    notificarSaidaProduto: true,
+                },
+            });
+            if (!preferencias) {
+                console.log(`🔕 Cliente ${clienteId} não encontrado`);
+                return;
+            }
+            const permitido = tipo === "MAQUINA_ON" ? preferencias.notificarMaquinaOn :
+                tipo === "MAQUINA_OFF" ? preferencias.notificarMaquinaOff :
+                    tipo === "PAGAMENTO" ? preferencias.notificarPagamentos :
+                        tipo === "SAIDA_PRODUTO" ? preferencias.notificarSaidaProduto :
+                            true;
+            if (!permitido) {
+                console.log(`🔕 Notificação ${tipo} desativada pelo cliente ${clienteId}`);
+                return;
+            }
+        }
+        const registros = await prisma.pix_FcmToken.findMany({
+            where: {
+                clienteId: clienteId,
+            },
+        });
+        if (registros.length === 0) {
+            console.log(`🔕 Cliente ${clienteId} não possui FCM registrado`);
+            return;
+        }
+        for (const registro of registros) {
+            try {
+                await firebase_admin_1.default.messaging().send({
+                    token: registro.token,
+                    notification: {
+                        title: titulo,
+                        body: mensagem,
+                    },
+                    android: {
+                        priority: "high",
+                    },
+                });
+                console.log(`🔔 Push enviado para cliente ${clienteId}`);
+            }
+            catch (error) {
+                const codigoErro = error?.code || "";
+                console.error(`❌ Erro ao enviar push para ${clienteId}:`, codigoErro || error?.message || error);
+                // Remove automaticamente tokens que não existem mais no Firebase
+                if (codigoErro === "messaging/registration-token-not-registered" ||
+                    codigoErro === "messaging/invalid-registration-token") {
+                    try {
+                        await prisma.pix_FcmToken.delete({
+                            where: {
+                                id: registro.id,
+                            },
+                        });
+                        console.log(`🧹 Token FCM inválido removido do cliente ${clienteId}`);
+                    }
+                    catch (erroDelete) {
+                        console.error(`❌ Erro ao remover token FCM inválido:`, erroDelete);
+                    }
+                }
+            }
+        }
+    }
+    catch (error) {
+        console.error("❌ Erro na função enviarPushCliente:", error);
+    }
+}
 // Constantes de configuração
 const PORT = process.env.PORT || 5001;
 const SALT_ROUNDS = 10;
@@ -84,6 +179,61 @@ async function getBloqueioCliente(clienteId) {
     }
     return { bloqueado: false, motivo: "", cliente };
 }
+// =====================================
+// IKPAY - CÁLCULO DA MENSALIDADE
+// =====================================
+async function calcularMensalidadeCliente(clienteId) {
+    const quantidadeMaquinas = await prisma.pix_Maquina.count({
+        where: {
+            clienteId: clienteId,
+            bloqueadaMensalidade: false
+        }
+    });
+    const valorPorMaquina = quantidadeMaquinas >= 5 ? 29.90 : 35.00;
+    const valorTotal = Number((quantidadeMaquinas * valorPorMaquina).toFixed(2));
+    return {
+        clienteId,
+        quantidadeMaquinas,
+        valorPorMaquina,
+        valorTotal,
+        diaVencimento: 15
+    };
+}
+// =====================================
+// IKPAY - GERAR COBRANÇA MENSAL
+// =====================================
+async function gerarCobrancaMensalCliente(clienteId, ano, mes) {
+    // mes: 1 = janeiro, 12 = dezembro
+    const vencimento = new Date(Date.UTC(ano, mes - 1, 15, 12, 0, 0));
+    const mensalidade = await calcularMensalidadeCliente(clienteId);
+    // Cliente sem máquinas liberadas não recebe cobrança
+    if (mensalidade.quantidadeMaquinas === 0) {
+        return { gerada: false, motivo: "SEM_MAQUINAS_LIBERADAS" };
+    }
+    const valor = mensalidade.valorTotal.toFixed(2);
+    // Evita alterar uma cobrança que já foi gerada
+    const cobranca = await prisma.pix_PagamentoCliente.upsert({
+        where: {
+            clienteId_dataDeVencimento: {
+                clienteId,
+                dataDeVencimento: vencimento
+            }
+        },
+        create: {
+            clienteId,
+            dataDeVencimento: vencimento,
+            valor,
+            status: "ABERTO",
+            diaPagamento: 15,
+            avisosEnviados: []
+        },
+        update: {}
+    });
+    return {
+        gerada: true,
+        cobranca
+    };
+}
 // Variáveis auxiliares (evitam erros de nomes não declarados)
 let ultimoAcessoMaquina01 = null;
 let valorDoPixMaquina01 = null;
@@ -95,6 +245,7 @@ const httpServer = (0, http_1.createServer)(app);
 const processandoWebhooks = new Set();
 const espInFlight = new Set();
 const espUltimoHeartbeat = new Map();
+const maquinasNotificadasOffline = new Set();
 const monitoramentoCache = new Map();
 const dashboardCache = new Map();
 const espSockets = new Map();
@@ -102,7 +253,7 @@ const espSocketToMachineId = new Map();
 const espWsPendentes = new Map();
 const espWsPendenciaPorMaquina = new Map();
 const ESP_HEARTBEAT_WRITE_MS = 30000;
-const ESP_WS_ACK_TIMEOUT_MS = 5000;
+const ESP_WS_ACK_TIMEOUT_MS = 36000;
 const DASHBOARD_CACHE_TTL_MS = 30000;
 const DASHBOARD_CACHE_MAX_ITEMS = 500;
 let processandoPagamentosPendentes = false;
@@ -137,9 +288,14 @@ function setDashboardCache(userId, data) {
         dashboardCache.delete(ordered[i][0]);
     }
 }
+function normalizeSignalLevel(value) {
+    if (value === null || value === undefined || Number.isNaN(value))
+        return null;
+    return Math.abs(value);
+}
 function parseWsNumber(value) {
     const parsed = parseInt(String(value ?? ""), 10);
-    return Number.isFinite(parsed) ? parsed : null;
+    return Number.isFinite(parsed) ? normalizeSignalLevel(parsed) : null;
 }
 function removerPendenciaWs(requestId) {
     if (!requestId)
@@ -159,24 +315,54 @@ function limparSocketEsp(machineId, socket) {
         espSocketToMachineId.delete(socket);
     }
 }
-async function registrarHeartbeatEsp(machineId, nivelDeSinal) {
+async function registrarHeartbeatEsp(machineId, nivelDeSinal, notificarOnline = false) {
     const agora = Date.now();
     const ultima = espUltimoHeartbeat.get(machineId) || 0;
-    if (agora - ultima < ESP_HEARTBEAT_WRITE_MS)
+    if (!notificarOnline &&
+        agora - ultima < ESP_HEARTBEAT_WRITE_MS)
         return;
+    console.log("========== HEARTBEAT DEBUG ==========");
+    console.log("machineId recebido:", machineId);
+    console.log("tipo:", typeof machineId);
+    const maquinaDebug = await prisma.pix_Maquina.findUnique({
+        where: { id: machineId },
+        select: {
+            id: true,
+            nome: true,
+            clienteId: true,
+            ultimaRequisicao: true,
+        },
+    });
+    const estavaOffline = !maquinaDebug?.ultimaRequisicao ||
+        tempoOffline(maquinaDebug.ultimaRequisicao) >=
+            MAQUINA_OFFLINE_ESTORNO_SEGUNDOS;
+    console.log("Máquina encontrada:", maquinaDebug);
+    console.log("=====================================");
     espUltimoHeartbeat.set(machineId, agora);
     const dataAtualizacao = {
         ultimaRequisicao: new Date(),
     };
-    if (nivelDeSinal !== null && nivelDeSinal !== undefined && !Number.isNaN(nivelDeSinal)) {
+    if (nivelDeSinal !== null &&
+        nivelDeSinal !== undefined &&
+        !Number.isNaN(nivelDeSinal)) {
         dataAtualizacao.nivelDeSinal = nivelDeSinal;
     }
-    await prisma.pix_Maquina.update({
+    await prisma.pix_Maquina
+        .update({
         where: { id: machineId },
         data: dataAtualizacao,
-    }).catch((err) => {
+    })
+        .catch((err) => {
         console.error("Erro ao registrar heartbeat WS da ESP:", err);
     });
+    if (notificarOnline &&
+        estavaOffline &&
+        maquinaDebug?.clienteId) {
+        await enviarPushCliente(String(maquinaDebug.clienteId), "Máquina Online 🟢", `${maquinaDebug.nome || "Máquina"} ficou online`, "MAQUINA_ON");
+    }
+    else {
+        maquinasNotificadasOffline.delete(machineId);
+    }
 }
 function calcularPulsosParaMaquinaWs(maquina) {
     const valorPixAtualStr = String(maquina?.valorDoPix || "0");
@@ -209,7 +395,7 @@ function calcularPulsosParaMaquinaWs(maquina) {
         metodosPermitidos.includes(metodoPagamento);
     let resultadoCalculo = { pulsos: pulsosBaseFormatado, bonus: 0 };
     if (podeAplicarBonus) {
-        resultadoCalculo = calcularPulsosDinamicos(valorPixAtual, valorPorPulso, maquina, metodoPagamento);
+        resultadoCalculo = (0, payment_pulses_1.calcularPulsosDinamicos)(valorPixAtual, valorPorPulso, maquina, metodoPagamento);
     }
     return {
         valorPixAtualStr,
@@ -236,6 +422,8 @@ async function tentarEnviarCreditoViaWs(machineId, options) {
         select: {
             id: true,
             nome: true,
+            clienteId: true,
+            bloqueadaMensalidade: true,
             valorDoPix: true,
             valorDoPulso: true,
             metodoPagamento: true,
@@ -246,6 +434,16 @@ async function tentarEnviarCreditoViaWs(machineId, options) {
     });
     if (!maquina) {
         return { enviado: false, motivo: "MAQUINA_NAO_ENCONTRADA" };
+    }
+    const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
+    if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
+        console.log(`🚫 Crédito WS bloqueado: ${maquina.nome} (${machineId})`);
+        return {
+            enviado: false,
+            motivo: bloqueio.bloqueado
+                ? "CLIENTE_BLOQUEADO"
+                : "MAQUINA_BLOQUEADA_MENSALIDADE",
+        };
     }
     const calculo = calcularPulsosParaMaquinaWs(maquina);
     if (calculo.pulsosFormatados === "0000") {
@@ -261,20 +459,21 @@ async function tentarEnviarCreditoViaWs(machineId, options) {
         metodoPagamento: calculo.metodoPagamento,
         source: options?.source || "SERVER_PUSH",
     };
+    const agora = Date.now();
+    // Registra a pendência ANTES de enviar o pulse.
+    espWsPendentes.set(requestId, {
+        requestId,
+        machineId,
+        pagamentoId: options?.pagamentoId,
+        valorDoPix: calculo.valorPixAtualStr,
+        pulsos: calculo.pulsosFormatados,
+        source: options?.source || "SERVER_PUSH",
+        createdAt: agora,
+        expiresAt: agora + ESP_WS_ACK_TIMEOUT_MS,
+    });
+    espWsPendenciaPorMaquina.set(machineId, requestId);
     try {
         conexao.socket.send(JSON.stringify(mensagem));
-        const agora = Date.now();
-        espWsPendentes.set(requestId, {
-            requestId,
-            machineId,
-            pagamentoId: options?.pagamentoId,
-            valorDoPix: calculo.valorPixAtualStr,
-            pulsos: calculo.pulsosFormatados,
-            source: options?.source || "SERVER_PUSH",
-            createdAt: agora,
-            expiresAt: agora + ESP_WS_ACK_TIMEOUT_MS,
-        });
-        espWsPendenciaPorMaquina.set(machineId, requestId);
         console.log(`
 📡 CRÉDITO ENVIADO VIA WS
 🏪 Máquina: ${maquina.nome} (${machineId})
@@ -298,7 +497,10 @@ async function tentarEnviarCreditoViaWs(machineId, options) {
             conexao.socket.terminate();
         }
         catch { }
-        return { enviado: false, motivo: "ERRO_ENVIO_WS" };
+        return {
+            enviado: false,
+            motivo: "ERRO_ENVIO_WS",
+        };
     }
 }
 async function confirmarPendenciaWs(requestId, machineId, nivelDeSinal) {
@@ -325,17 +527,45 @@ async function confirmarPendenciaWs(requestId, machineId, nivelDeSinal) {
         console.error("Erro ao limpar crédito após ACK WS:", err);
     });
     if (pendencia.pagamentoId) {
-        await prisma.pix_Pagamento.updateMany({
-            where: {
-                id: pendencia.pagamentoId,
-                estornado: false,
-            },
-            data: {
-                status: "CONFIRMADO",
-            },
-        }).catch((err) => {
+        try {
+            const resultadoConfirmacao = await prisma.pix_Pagamento.updateMany({
+                where: {
+                    id: pendencia.pagamentoId,
+                    estornado: false,
+                    status: "PENDENTE",
+                },
+                data: {
+                    status: "CONFIRMADO",
+                },
+            });
+            if (resultadoConfirmacao.count > 0) {
+                const pagamentoConfirmado = await prisma.pix_Pagamento.findUnique({
+                    where: {
+                        id: pendencia.pagamentoId,
+                    },
+                    include: {
+                        maquina: true,
+                    },
+                });
+                if (pagamentoConfirmado &&
+                    pagamentoConfirmado.clienteId) {
+                    const valorFormatado = Number(pagamentoConfirmado.valor)
+                        .toFixed(2)
+                        .replace(".", ",");
+                    const tipoPagamento = pagamentoConfirmado.tipo === "credit_card"
+                        ? "CRÉDITO"
+                        : pagamentoConfirmado.tipo === "debit_card"
+                            ? "DÉBITO"
+                            : pagamentoConfirmado.tipo === "bank_transfer"
+                                ? "PIX"
+                                : pagamentoConfirmado.tipo || "PAGAMENTO";
+                    await enviarPushCliente(String(pagamentoConfirmado.clienteId), "Pagamento recebido 💰", `${pagamentoConfirmado.maquina.nome || "Máquina"} recebeu R$ ${valorFormatado} via ${tipoPagamento}`, "PAGAMENTO");
+                }
+            }
+        }
+        catch (err) {
             console.error("Erro ao confirmar pagamento após ACK WS:", err);
-        });
+        }
     }
     console.log(`
 ✅ ACK RECEBIDO VIA WS
@@ -415,6 +645,38 @@ async function processarPagamentosPendentes() {
 setInterval(() => {
     void processarPagamentosPendentes();
 }, 10000);
+setInterval(async () => {
+    try {
+        const limiteOffline = new Date(Date.now() - MAQUINA_OFFLINE_ESTORNO_SEGUNDOS * 1000);
+        const maquinasOffline = await prisma.pix_Maquina.findMany({
+            where: {
+                ultimaRequisicao: {
+                    lt: limiteOffline,
+                },
+            },
+            select: {
+                id: true,
+                nome: true,
+                clienteId: true,
+            },
+        });
+        for (const maquina of maquinasOffline) {
+            // Já avisamos sobre esta queda.
+            if (maquinasNotificadasOffline.has(maquina.id)) {
+                continue;
+            }
+            // Marca antes do envio para impedir duplicidade.
+            maquinasNotificadasOffline.add(maquina.id);
+            if (!maquina.clienteId) {
+                continue;
+            }
+            await enviarPushCliente(String(maquina.clienteId), "Máquina Offline 🔴", `${maquina.nome || "Máquina"} ficou offline`, "MAQUINA_OFF");
+        }
+    }
+    catch (err) {
+        console.error("Erro ao monitorar máquinas offline:", err);
+    }
+}, 15000);
 setInterval(() => {
     const limite = Date.now() - 26 * 60 * 60 * 1000;
     for (const [k, ts] of monitoramentoCache) {
@@ -449,6 +711,14 @@ setInterval(() => {
     }
 }, 1000);
 const wss = new ws_1.WebSocketServer({ server: httpServer, path: "/ws/esp" });
+// Verificação periódica das conexões WebSocket
+setInterval(() => {
+    wss.clients.forEach((socket) => {
+        if (socket.readyState === ws_1.WebSocket.OPEN) {
+            socket.ping();
+        }
+    });
+}, 30000);
 wss.on("connection", (socket, req) => {
     const ip = String(req.headers["x-forwarded-for"] || req.socket.remoteAddress || "");
     socket.on("message", async (raw) => {
@@ -481,7 +751,7 @@ wss.on("connection", (socket, req) => {
                     firmware: msg?.firmware ? String(msg.firmware) : undefined,
                 });
                 espSocketToMachineId.set(socket, machineId);
-                await registrarHeartbeatEsp(machineId, nivelDeSinal);
+                await registrarHeartbeatEsp(machineId, nivelDeSinal, true);
                 socket.send(JSON.stringify({
                     type: "hello_ack",
                     ok: true,
@@ -539,7 +809,7 @@ wss.on("connection", (socket, req) => {
         if (!machineId)
             return;
         limparSocketEsp(machineId, socket);
-        console.log(`🔌 ESP OFFLINE VIA WS: ${machineId}`);
+        console.log(`🔌 ESP DESCONECTOU VIA WS: ${machineId}`);
     });
     socket.on("error", (err) => {
         const machineId = espSocketToMachineId.get(socket);
@@ -572,6 +842,7 @@ setInterval(() => {
 app.use((0, cors_1.default)());
 app.use(body_parser_1.default.urlencoded({ extended: true }));
 app.use(body_parser_1.default.json());
+(0, stone_payments_1.registrarRotaPagamentosStone)(app, prisma, payment_pulses_1.calcularPulsosDinamicos);
 /**
  * Middleware para verificação de JWT padrão
  * Verifica se o token é válido e adiciona o userId ao objeto de requisição
@@ -648,44 +919,6 @@ const PIX_CONFIG = {
     MAQUINA_BATOM_EFI01: 0, // txid 70a8cacb59b53eac8ccb
     PLAQUINHA_PIX_MP: 5000 // storeid
 };
-/**
- * Calcula a quantidade de pulsos com base no valor pago e nas regras de bônus ativas na máquina
- * @param valorPix Valor pago via PIX
- * @param valorPorPulso Valor base de cada pulso
- * @param maquina Objeto da máquina com configurações de bônus
- * @returns Objeto com pulsos formatados e valor do bônus aplicado
- */
-function calcularPulsosDinamicos(valorPix, valorPorPulso = 1.0, maquina, metodoPagamento) {
-    const metodo = (metodoPagamento || "PIX").toUpperCase();
-    let pulsosBase = Math.floor(valorPix / valorPorPulso);
-    let bonusExtra = 0;
-    // 🔒 normaliza métodos permitidos
-    const metodosPermitidos = Array.isArray(maquina?.bonusMetodos)
-        ? maquina.bonusMetodos.map((m) => String(m).toUpperCase())
-        : [];
-    // 🎯 regra final do bônus
-    const podeAplicarBonus = maquina?.bonusAtivo === true &&
-        metodo !== "REMOTO" &&
-        metodosPermitidos.includes(metodo);
-    if (podeAplicarBonus) {
-        const regras = Array.isArray(maquina?.bonusRegras)
-            ? maquina.bonusRegras
-            : [];
-        const valorPagoCentavos = Math.round(Number(valorPix) * 100);
-        for (const regra of regras) {
-            const minimoCentavos = Math.round(Number(regra.valorMinimo) * 100);
-            if (valorPagoCentavos === minimoCentavos) {
-                bonusExtra = Number(regra.bonus) || 0;
-                break;
-            }
-        }
-    }
-    const total = pulsosBase + bonusExtra;
-    return {
-        pulsos: String(total).padStart(4, "0"),
-        bonus: bonusExtra,
-    };
-}
 /**
  * Converte o valor do PIX recebido em pulsos
  * @param valorPix Valor do PIX recebido
@@ -896,15 +1129,21 @@ async function estornarMP(id, token, motivoEstorno, tamanhoChave = 32) {
         return response.data;
     }
     catch (error) {
-        console.error(`Erro ao efetuar o estorno da operação: ${id}`);
-        console.error('Detalhes do erro:', error);
+        const erroAxios = error;
+        const status = erroAxios?.response?.status;
+        const motivoErro = erroAxios?.response?.data?.message ||
+            erroAxios?.response?.data?.cause?.[0]?.description ||
+            erroAxios?.message ||
+            "erro desconhecido";
         numTentativasEstorno++;
         if (numTentativasEstorno < MAX_TENTATIVAS) {
+            console.log(`⏳ Estorno falhou. Aguardando 2 segundos antes da tentativa ${numTentativasEstorno}...`);
+            await new Promise(resolve => setTimeout(resolve, 2000));
             // Tentar novamente recursivamente
             return await estornarMP(id, token, motivoEstorno, tamanhoChave);
         }
         else {
-            console.error(`Após ${MAX_TENTATIVAS} tentativas não foi possível efetuar o estorno. VERIFIQUE O TOKEN DO CLIENTE!!`);
+            console.error(`Estorno não concluído | pagamento: ${id} | motivo: ${motivoEstorno} | status: ${status ?? "sem status"} | erro: ${motivoErro}`);
             numTentativasEstorno = 1;
             return undefined;
         }
@@ -928,7 +1167,7 @@ const WEBHOOK_CONFIG = {
  */
 app.get("/consulta-maquina01", async (req, res) => {
     try {
-        const resultado = calcularPulsosDinamicos(MAQUINAS.MAQUINA_01.valor, 1.0, null);
+        const resultado = (0, payment_pulses_1.calcularPulsosDinamicos)(MAQUINAS.MAQUINA_01.valor, 1.0, null);
         const pulsosFormatados = resultado.pulsos;
         // Resetar valor e atualizar último acesso
         MAQUINAS.MAQUINA_01.valor = 0;
@@ -1046,7 +1285,7 @@ app.get("/monitoramento-html", async (req, res) => {
     res.send(html);
 });
 app.get("/consulta-pix-efi-maq-batom-01", async (req, res) => {
-    const resultado = calcularPulsosDinamicos(valordoPixMaquinaBatomEfi01 ?? 0, 1.0, null);
+    const resultado = (0, payment_pulses_1.calcularPulsosDinamicos)(valordoPixMaquinaBatomEfi01 ?? 0, 1.0, null);
     var pulsosFormatados = resultado.pulsos;
     valordoPixMaquinaBatomEfi01 = 0; //<<<<<<<<<ALTERAR PARA O NUMERO DA MAQUINA
     if (pulsosFormatados != "0000") {
@@ -1224,28 +1463,70 @@ app.post("/config", async (req, res) => {
 });
 app.post("/new-cliente", async (req, res) => {
     try {
-        const { nome, email, senha } = req.body;
-        // 1️⃣ Verificar se o e-mail já existe em Pix_Pessoa
+        const { nome, cpf, email, telefone, senha, cep, endereco, numero, bairro, cidade, uf, complemento, } = req.body;
+        // Verificar os dados obrigatórios
+        if (!nome || !cpf || !email || !telefone || !senha) {
+            return res.status(400).json({
+                error: "Preencha todos os campos obrigatórios.",
+            });
+        }
+        // Verificar se o e-mail já está cadastrado
         const pessoaExistente = await prisma.pix_Cliente.findUnique({
-            where: { email },
+            where: { email: email.trim() },
         });
         if (pessoaExistente) {
-            return res
-                .status(400)
-                .json({ error: "E-mail já cadastrado no sistema." });
+            return res.status(400).json({
+                error: "E-mail já cadastrado no sistema.",
+            });
         }
-        // 2️⃣ Criptografar senha
+        // Criptografar a senha
         const salt = await bcrypt_1.default.genSalt(10);
         const senhaHash = await bcrypt_1.default.hash(senha, salt);
-        req.body.pessoaId = 'd37ae2e9-ced6-432d-97f5-4e7da5c946fb';
-        req.body.senha = senhaHash;
-        const cliente = await prisma.pix_Cliente.create({ data: req.body });
-        cliente.senha = senhaHash;
-        return res.json(cliente);
+        // Buscar o ADM do banco de dados atual
+        const adm = await prisma.pix_Pessoa.findFirst({
+            select: {
+                id: true,
+            },
+        });
+        if (!adm) {
+            return res.status(500).json({
+                error: "Administrador responsável não encontrado neste banco.",
+            });
+        }
+        // Criar o cliente
+        const cliente = await prisma.pix_Cliente.create({
+            data: {
+                nome: nome.trim(),
+                cpf: String(cpf).replace(/\D/g, ""),
+                email: email.trim(),
+                telefone: String(telefone).replace(/\D/g, ""),
+                senha: senhaHash,
+                pessoaId: adm.id,
+                status: "ANALISE",
+                cep: cep ? String(cep).replace(/\D/g, "") : null,
+                endereco: endereco || null,
+                numero: numero ? String(numero) : null,
+                bairro: bairro || null,
+                cidade: cidade || null,
+                uf: uf || null,
+                complemento: complemento || null,
+            },
+            select: {
+                id: true,
+                nome: true,
+                cpf: true,
+                email: true,
+                telefone: true,
+                status: true,
+            },
+        });
+        return res.status(200).json(cliente);
     }
     catch (err) {
         console.error("Erro ao criar cliente:", err);
-        return res.status(500).json({ error: err.message });
+        return res.status(500).json({
+            error: "Erro interno ao realizar cadastro.",
+        });
     }
 });
 app.post("/cliente", verifyJwtPessoa, async (req, res) => {
@@ -1325,6 +1606,87 @@ app.delete('/cliente/:id', verifyJwtPessoa, async (req, res) => {
     catch (error) {
         console.error('Erro ao excluir o cliente:', error);
         res.status(500).json({ error: 'Erro ao excluir o cliente' });
+    }
+});
+// 🔔 CONSULTAR PREFERÊNCIAS DE NOTIFICAÇÕES DO CLIENTE
+app.get("/notificacoes/preferencias", verifyJWT, async (req, res) => {
+    try {
+        const clienteId = req.userId;
+        const preferencias = await prisma.pix_Cliente.findUnique({
+            where: { id: clienteId },
+            select: {
+                notificarMaquinaOn: true,
+                notificarMaquinaOff: true,
+                notificarPagamentos: true,
+                notificarSaidaProduto: true,
+            },
+        });
+        if (!preferencias) {
+            return res.status(404).json({
+                error: "Cliente não encontrado",
+            });
+        }
+        return res.status(200).json(preferencias);
+    }
+    catch (error) {
+        console.error("Erro ao consultar preferências:", error);
+        return res.status(500).json({
+            error: "Erro ao consultar preferências de notificações",
+        });
+    }
+});
+// 🔔 SALVAR PREFERÊNCIAS DE NOTIFICAÇÕES DO CLIENTE
+app.put("/notificacoes/preferencias", verifyJWT, async (req, res) => {
+    try {
+        const clienteId = req.userId;
+        const campos = [
+            "notificarMaquinaOn",
+            "notificarMaquinaOff",
+            "notificarPagamentos",
+            "notificarSaidaProduto",
+        ];
+        const data = {};
+        for (const campo of campos) {
+            const valor = req.body?.[campo];
+            if (valor !== undefined) {
+                if (typeof valor !== "boolean") {
+                    return res.status(400).json({
+                        error: `${campo} deve ser true ou false`,
+                    });
+                }
+                data[campo] = valor;
+            }
+        }
+        if (Object.keys(data).length === 0) {
+            return res.status(400).json({
+                error: "Nenhuma preferência válida foi informada",
+            });
+        }
+        const resultado = await prisma.pix_Cliente.updateMany({
+            where: { id: clienteId },
+            data,
+        });
+        if (resultado.count === 0) {
+            return res.status(404).json({
+                error: "Cliente não encontrado",
+            });
+        }
+        const preferencias = await prisma.pix_Cliente.findUnique({
+            where: { id: clienteId },
+            select: {
+                notificarMaquinaOn: true,
+                notificarMaquinaOff: true,
+                notificarPagamentos: true,
+                notificarSaidaProduto: true,
+            },
+        });
+        return res.status(200).json(preferencias);
+    }
+    catch (error) {
+        console.error("Erro ao salvar preferências:", error);
+        return res.status(500).json({
+            error: "Erro ao salvar preferências de notificações",
+        });
     }
 });
 // Funcionário
@@ -1701,23 +2063,28 @@ app.put("/maquina", verifyJwtPessoa, async (req, res) => {
             select: { clienteId: true }
         });
         if (!maquina) {
-            return res.status(404).json({ error: "Nenhuma máquina encontrada com o id fornecido." });
+            return res.status(404).json({
+                error: "Nenhuma máquina encontrada com o id fornecido."
+            });
         }
-        // Condições para verificar duplicidade somente se os valores de store_id e maquininha_serial não forem vazios
+        // Verifica duplicidade dentro do mesmo cliente
         const filtroDuplicidade = {
             AND: [
-                { clienteId: maquina.clienteId }, // Filtra pelo cliente
+                { clienteId: maquina.clienteId },
                 {
                     OR: [
                         req.body.nome ? { nome: req.body.nome } : undefined,
-                        req.body.store_id !== "" ? { store_id: req.body.store_id } : undefined,
-                        req.body.maquininha_serial !== "" ? { maquininha_serial: req.body.maquininha_serial } : undefined
-                    ].filter(Boolean) // Remove condições indefinidas
+                        req.body.store_id !== ""
+                            ? { store_id: req.body.store_id }
+                            : undefined,
+                        req.body.maquininha_serial !== ""
+                            ? { maquininha_serial: req.body.maquininha_serial }
+                            : undefined
+                    ].filter(Boolean)
                 },
-                { NOT: { id: req.body.id } } // Exclui a máquina atual da verificação
+                { NOT: { id: req.body.id } }
             ]
         };
-        // Verifique se já existe uma máquina com o mesmo nome, store_id ou maquininha_serial para este cliente, mas exclua a máquina atual
         const maquinaExistente = await prisma.pix_Maquina.findFirst({
             where: filtroDuplicidade,
             select: {
@@ -1732,8 +2099,7 @@ app.put("/maquina", verifyJwtPessoa, async (req, res) => {
                 error: `Já existe uma máquina com o nome (${maquinaExistente.nome}), store_id (${maquinaExistente.store_id}) ou maquininha_serial (${maquinaExistente.maquininha_serial}) para este cliente.`
             });
         }
-        // Se não houver conflitos, atualiza a máquina
-        // Monta o objeto de atualização sem sobrescrever campos não enviados
+        // Dados que serão atualizados
         const dataUpdate1 = {
             nome: req.body.nome,
             descricao: req.body.descricao,
@@ -1743,24 +2109,35 @@ app.put("/maquina", verifyJwtPessoa, async (req, res) => {
             bonusRegras: req.body.bonusRegras,
             bonusMetodos: req.body.bonusMetodos,
         };
-        // Atualiza store_id somente se vier no body; vazio limpa explicitamente
-        if (typeof req.body.store_id !== 'undefined') {
-            dataUpdate1.store_id = req.body.store_id === "" ? null : req.body.store_id;
+        // Bloqueio individual por mensalidade
+        if (typeof req.body.bloqueadaMensalidade === "boolean") {
+            dataUpdate1.bloqueadaMensalidade =
+                req.body.bloqueadaMensalidade;
         }
-        // Atualiza maquininha_serial somente se vier no body; vazio limpa explicitamente
-        if (typeof req.body.maquininha_serial !== 'undefined') {
-            dataUpdate1.maquininha_serial = req.body.maquininha_serial === "" ? null : req.body.maquininha_serial;
+        // Atualiza store_id somente se vier no body
+        if (typeof req.body.store_id !== "undefined") {
+            dataUpdate1.store_id =
+                req.body.store_id === "" ? null : req.body.store_id;
+        }
+        // Atualiza maquininha_serial somente se vier no body
+        if (typeof req.body.maquininha_serial !== "undefined") {
+            dataUpdate1.maquininha_serial =
+                req.body.maquininha_serial === ""
+                    ? null
+                    : req.body.maquininha_serial;
         }
         const maquinaAtualizada = await prisma.pix_Maquina.update({
             where: { id: req.body.id },
             data: dataUpdate1,
         });
-        console.log('Máquina atualizada com sucesso:', maquinaAtualizada);
+        console.log("Máquina atualizada com sucesso:", maquinaAtualizada);
         return res.status(200).json(maquinaAtualizada);
     }
     catch (err) {
         console.log(err);
-        return res.status(500).json({ error: `Erro ao atualizar a máquina: ${err.message}` });
+        return res.status(500).json({
+            error: `Erro ao atualizar a máquina: ${err.message}`
+        });
     }
 });
 app.get("/maquina/:id", async (req, res) => {
@@ -2064,6 +2441,25 @@ app.get("/consultar-maquina/:id", async (req: any, res) => {
 //     return res.status(500).json({ "retorno": "0000" });
 //   }
 // });
+app.get("/mensalidade/:clienteId", verifyJWT, async (req, res) => {
+    try {
+        const { clienteId } = req.params;
+        // Impede consultar a mensalidade de outro cliente
+        if (String(req.userId) !== String(clienteId)) {
+            return res.status(403).json({
+                erro: "ACESSO_NEGADO"
+            });
+        }
+        const mensalidade = await calcularMensalidadeCliente(clienteId);
+        return res.status(200).json(mensalidade);
+    }
+    catch (error) {
+        console.error("Erro ao consultar mensalidade:", error);
+        return res.status(500).json({
+            erro: "ERRO_CONSULTAR_MENSALIDADE"
+        });
+    }
+});
 app.get("/consultar-maquina/:id", async (req, res) => {
     try {
         const maquinaId = req.params.id;
@@ -2107,13 +2503,27 @@ app.get("/consultar-maquina/:id", async (req, res) => {
                 bonusAtivo: true,
                 bonusMetodos: true,
                 bonusRegras: true,
+                ultimaRequisicao: true,
+                bloqueadaMensalidade: true,
             },
         });
         let pulsosFormatados = "0000";
         if (maquina) {
+            const estavaOffline = !maquina.ultimaRequisicao ||
+                tempoOffline(maquina.ultimaRequisicao) >=
+                    MAQUINA_OFFLINE_ESTORNO_SEGUNDOS;
+            if (estavaOffline && maquina.clienteId) {
+                maquinasNotificadasOffline.delete(maquinaId);
+                void enviarPushCliente(String(maquina.clienteId), "Máquina Online 🟢", `${maquina.nome || "Máquina"} ficou online`);
+            }
+            else {
+                maquinasNotificadasOffline.delete(maquinaId);
+            }
             const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
-            const sinalInt = nivelDeSinal != undefined ? parseInt(String(nivelDeSinal)) : null;
-            if (bloqueio.bloqueado) {
+            const sinalInt = nivelDeSinal != undefined
+                ? normalizeSignalLevel(parseInt(String(nivelDeSinal), 10))
+                : null;
+            if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
                 await prisma.pix_Maquina.update({
                     where: { id: maquinaId },
                     data: {
@@ -2189,6 +2599,28 @@ app.get("/consultar-maquina/:id", async (req, res) => {
                     where: { id: pagamentoPendente.id },
                     data: { status: "CONFIRMADO" },
                 });
+                const pagamentoConfirmado = await prisma.pix_Pagamento.findUnique({
+                    where: {
+                        id: pagamentoPendente.id,
+                    },
+                    include: {
+                        maquina: true,
+                    },
+                });
+                if (pagamentoConfirmado &&
+                    pagamentoConfirmado.clienteId) {
+                    const valorFormatado = Number(pagamentoConfirmado.valor)
+                        .toFixed(2)
+                        .replace(".", ",");
+                    const tipoPagamento = pagamentoConfirmado.tipo === "credit_card"
+                        ? "CRÉDITO"
+                        : pagamentoConfirmado.tipo === "debit_card"
+                            ? "DÉBITO"
+                            : pagamentoConfirmado.tipo === "bank_transfer"
+                                ? "PIX"
+                                : pagamentoConfirmado.tipo || "PAGAMENTO";
+                    await enviarPushCliente(String(pagamentoConfirmado.clienteId), "Pagamento recebido 💰", `${pagamentoConfirmado.maquina.nome || "Máquina"} recebeu R$ ${valorFormatado} via ${tipoPagamento}`, "PAGAMENTO");
+                }
             }
             const metodoPagamento = String(maquina.metodoPagamento || "PIX").toUpperCase();
             const metodosPermitidos = Array.isArray(maquina?.bonusMetodos)
@@ -2203,7 +2635,7 @@ app.get("/consultar-maquina/:id", async (req, res) => {
                 metodosPermitidos.includes(metodoPagamento);
             let resultadoCalculo = { pulsos: pulsosBaseFormatado, bonus: 0 };
             if (podeAplicarBonus) {
-                resultadoCalculo = calcularPulsosDinamicos(valorPixAtual, valorPorPulso, maquina, metodoPagamento);
+                resultadoCalculo = (0, payment_pulses_1.calcularPulsosDinamicos)(valorPixAtual, valorPorPulso, maquina, metodoPagamento);
             }
             pulsosFormatados = resultadoCalculo.pulsos;
             const valorCreditoTexto = Number.isFinite(valorPixAtual)
@@ -2243,6 +2675,13 @@ app.get("/consultar-maquina/:id", async (req, res) => {
             }
         }
         else {
+            console.log(`
+❌ MÁQUINA NÃO ENCONTRADA
+🆔 ID pesquisado: "${maquinaId}"
+🌐 URL: ${req.originalUrl}
+📶 Sinal: ${req.query.nivelDeSinal ?? ""}
+🌍 IP: ${ip}
+`);
         }
         return res.status(200).json({ retorno: pulsosFormatados });
     }
@@ -2259,7 +2698,7 @@ app.get("/consultar-maquina/:id", async (req, res) => {
         espInFlight.delete(req.params.id);
     }
 });
-//SIMULA UM CRÉDITO REMOTO
+//SIMULA UM CRÉDITO REMOTO ADM
 app.post("/credito-remoto", verifyJwtPessoa, async (req, res) => {
     try {
         const maquina = await prisma.pix_Maquina.findUnique({
@@ -2270,66 +2709,124 @@ app.post("/credito-remoto", verifyJwtPessoa, async (req, res) => {
                 cliente: true,
             },
         });
-        //VERIFICANDO SE A MÁQUINA PERTENCE A UM CIENTE ATIVO 
-        if (maquina != null) {
-            if (maquina.cliente !== null && maquina.cliente !== undefined) {
-                if (maquina.cliente.ativo && !isInadimplente(maquina.cliente.dataVencimento)) {
-                    console.log("Cliente ativo - seguindo...");
-                }
-                else {
-                    console.log("Cliente inativo - parando...");
-                    return res.status(500).json({ "retorno": `CLIENTE ${maquina.cliente.nome} INATIVO` });
-                }
+        // ==============================
+        // VERIFICA SE A MÁQUINA EXISTE
+        // ==============================
+        if (!maquina) {
+            console.log("Máquina não encontrada");
+            return res.status(301).json({
+                retorno: "ID NÃO ENCONTRADO"
+            });
+        }
+        // ==============================
+        // VERIFICA CLIENTE
+        // ==============================
+        if (maquina.cliente !== null && maquina.cliente !== undefined) {
+            if (maquina.cliente.ativo &&
+                !isInadimplente(maquina.cliente.dataVencimento)) {
+                console.log("Cliente ativo - seguindo...");
             }
             else {
-                console.log("error.. cliente nulo!");
+                console.log("Cliente inativo - parando...");
+                return res.status(500).json({
+                    retorno: `CLIENTE ${maquina.cliente.nome} INATIVO`
+                });
             }
-            //VERIFICAR SE A MAQUINA ESTA ONINE
-            if (maquina.ultimaRequisicao) {
-                var status = (tempoOffline(maquina.ultimaRequisicao)) > 60 ? "OFFLINE" : "ONLINE";
-                console.log(status);
-                if (status == "OFFLINE") {
-                    return res.status(400).json({ "msg": "MÁQUINA OFFLINE!" });
-                }
-            }
-            else {
-                return res.status(400).json({ "msg": "MÁQUINA OFFLINE!" });
-            }
-            await prisma.pix_Maquina.update({
-                where: {
-                    id: req.body.id
-                },
-                data: {
-                    valorDoPix: String(req.body.valor), // 🔥 FIX
-                    metodoPagamento: "REMOTO", // 🔥 ESSENCIAL
-                    ultimoPagamentoRecebido: new Date()
-                }
-            });
-            //registrando quem fez o crédito remoto
-            var adm = await prisma.pix_Pessoa.findUnique({
-                where: {
-                    id: req.userId,
-                },
-            });
-            const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-            registrarCreditoRemoto(adm?.email || "", ip, maquina.id, req.body.valor);
-            if (NOTIFICACOES_CREDITO_REMOTO) {
-                notificarDiscord(DISCORD_WEBHOOKS.CREDITO_REMOTO, `CRÉDITO REMOTO DE R$: ${req.body.valor} em ${maquina.nome} de ${maquina.cliente?.nome}`, `Enviado pelo adm: ${req.userId} `);
-            }
-            void tentarEnviarCreditoViaWs(maquina.id, { source: "CREDITO_REMOTO_ADM" });
-            return res.status(200).json({ "retorno": "CREDITO INSERIDO" });
         }
         else {
-            console.log("não encontrou");
-            return res.status(301).json({ "retorno": "ID NÃO ENCONTRADO" });
+            console.log("error.. cliente nulo!");
         }
+        // ==============================
+        // VERIFICA SE A MÁQUINA ESTÁ ONLINE
+        // ==============================
+        if (maquina.ultimaRequisicao) {
+            const status = tempoOffline(maquina.ultimaRequisicao) > 60
+                ? "OFFLINE"
+                : "ONLINE";
+            console.log(`Máquina ${maquina.nome}: ${status}`);
+            if (status === "OFFLINE") {
+                return res.status(400).json({
+                    msg: "MÁQUINA OFFLINE!"
+                });
+            }
+        }
+        else {
+            return res.status(400).json({
+                msg: "MÁQUINA OFFLINE!"
+            });
+        }
+        // ==============================
+        // VALOR DO CRÉDITO
+        // ==============================
+        const valorCredito = String(req.body.valor);
+        if (!valorCredito ||
+            Number.isNaN(parseFloat(valorCredito)) ||
+            parseFloat(valorCredito) <= 0) {
+            return res.status(400).json({
+                retorno: "VALOR DE CRÉDITO INVÁLIDO"
+            });
+        }
+        // ==============================
+        // GRAVA O CRÉDITO NA MÁQUINA
+        // ==============================
+        await prisma.pix_Maquina.update({
+            where: {
+                id: maquina.id
+            },
+            data: {
+                valorDoPix: valorCredito,
+                metodoPagamento: "REMOTO",
+                ultimoPagamentoRecebido: new Date()
+            }
+        });
+        console.log(`
+========================================
+💰 CRÉDITO REMOTO ADMINISTRADOR
+========================================
+🏪 Máquina: ${maquina.nome}
+🆔 ID: ${maquina.id}
+💵 Valor: ${valorCredito}
+💳 Método: REMOTO
+========================================
+`);
+        // ==============================
+        // REGISTRA QUEM FEZ O CRÉDITO
+        // ==============================
+        const adm = await prisma.pix_Pessoa.findUnique({
+            where: {
+                id: req.userId,
+            },
+        });
+        const ip = req.headers["x-forwarded-for"] ||
+            req.socket.remoteAddress;
+        registrarCreditoRemoto(adm?.email || "", ip, maquina.id, req.body.valor);
+        // ==============================
+        // NOTIFICAÇÃO
+        // ==============================
+        if (NOTIFICACOES_CREDITO_REMOTO) {
+            notificarDiscord(DISCORD_WEBHOOKS.CREDITO_REMOTO, `CRÉDITO REMOTO DE R$: ${valorCredito} em ${maquina.nome} de ${maquina.cliente?.nome}`, `Enviado pelo adm: ${req.userId}`);
+        }
+        // ==============================
+        // TENTA ENVIAR PELO WEBSOCKET
+        // ==============================
+        void tentarEnviarCreditoViaWs(maquina.id, {
+            source: "CREDITO_REMOTO_ADM"
+        });
+        // ==============================
+        // RESPOSTA
+        // ==============================
+        return res.status(200).json({
+            retorno: "CREDITO INSERIDO"
+        });
     }
     catch (err) {
-        console.log(err);
-        return res.status(500).json({ "retorno": "ERRO: see: console > view logs" });
+        console.log("Erro no crédito remoto:", err);
+        return res.status(500).json({
+            retorno: "ERRO: see: console > view logs"
+        });
     }
 });
-//SIMULA UM CRÉDITO REMOTO
+//SIMULA UM CRÉDITO REMOTO CLIENTE
 app.post("/credito-remoto-cliente", verifyJWT, async (req, res) => {
     try {
         const maquina = await prisma.pix_Maquina.findUnique({
@@ -2340,62 +2837,127 @@ app.post("/credito-remoto-cliente", verifyJWT, async (req, res) => {
                 cliente: true,
             },
         });
-        //VERIFICANDO SE A MÁQUINA PERTENCE A UM CIENTE ATIVO 
-        if (maquina != null) {
-            if (maquina.cliente !== null && maquina.cliente !== undefined) {
-                if (maquina.cliente.ativo && !isInadimplente(maquina.cliente.dataVencimento)) {
-                    console.log("Cliente ativo - seguindo...");
-                }
-                else {
-                    console.log("Cliente inativo - parando...");
-                    return res.status(500).json({ "retorno": `CLIENTE ${maquina.cliente.nome} INATIVO` });
-                }
+        // ==============================
+        // VERIFICA SE A MÁQUINA EXISTE
+        // ==============================
+        if (!maquina) {
+            console.log("Máquina não encontrada");
+            return res.status(301).json({
+                retorno: "ID NÃO ENCONTRADO"
+            });
+        }
+        // ==============================
+        // VERIFICA CLIENTE
+        // ==============================
+        if (maquina.cliente !== null && maquina.cliente !== undefined) {
+            if (maquina.bloqueadaMensalidade === true) {
+                console.log(`🚫 Crédito remoto cliente bloqueado: ${maquina.nome}`);
+                return res.status(403).json({
+                    retorno: "MAQUINA_BLOQUEADA_MENSALIDADE"
+                });
+            }
+            if (maquina.cliente.ativo &&
+                !isInadimplente(maquina.cliente.dataVencimento)) {
+                console.log("Cliente ativo - seguindo...");
             }
             else {
-                console.log("error.. cliente nulo!");
+                console.log("Cliente inativo - parando...");
+                return res.status(500).json({
+                    retorno: `CLIENTE ${maquina.cliente.nome} INATIVO`
+                });
             }
-            //VERIFICAR SE A MAQUINA ESTA ONINE
-            if (maquina.ultimaRequisicao) {
-                var status = tempoOffline(maquina.ultimaRequisicao) > 60 ? "OFFLINE" : "ONLINE";
-                console.log(status);
-                if (status == "OFFLINE") {
-                    return res.status(400).json({ "msg": "MÁQUINA OFFLINE!" });
-                }
-            }
-            else {
-                return res.status(400).json({ "msg": "MÁQUINA OFFLINE!" });
-            }
-            await prisma.pix_Maquina.update({
-                where: {
-                    id: req.body.id
-                },
-                data: {
-                    valorDoPix: req.body.valor,
-                    ultimoPagamentoRecebido: new Date(Date.now())
-                }
-            });
-            //registrando quem fez o crédito remoto
-            var cliente = await prisma.pix_Cliente.findUnique({
-                where: {
-                    id: req.userId,
-                },
-            });
-            const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
-            registrarCreditoRemoto(cliente?.email || "", ip, maquina.id, req.body.valor);
-            if (NOTIFICACOES_CREDITO_REMOTO) {
-                notificarDiscord(DISCORD_WEBHOOKS.CREDITO_REMOTO, `CRÉDITO REMOTO DE R$: ${req.body.valor} em ${maquina.nome} de ${maquina.cliente?.nome}`, `Enviado pelo cliente: ${req.userId} `);
-            }
-            void tentarEnviarCreditoViaWs(maquina.id, { source: "CREDITO_REMOTO_CLIENTE" });
-            return res.status(200).json({ "retorno": "CREDITO INSERIDO" });
         }
         else {
-            console.log("não encontrou");
-            return res.status(301).json({ "retorno": "ID NÃO ENCONTRADO" });
+            console.log("error.. cliente nulo!");
         }
+        // ==============================
+        // VERIFICA SE A MÁQUINA ESTÁ ONLINE
+        // ==============================
+        if (maquina.ultimaRequisicao) {
+            const status = tempoOffline(maquina.ultimaRequisicao) > 60
+                ? "OFFLINE"
+                : "ONLINE";
+            console.log(`Máquina ${maquina.nome}: ${status}`);
+            if (status === "OFFLINE") {
+                return res.status(400).json({
+                    msg: "MÁQUINA OFFLINE!"
+                });
+            }
+        }
+        else {
+            return res.status(400).json({
+                msg: "MÁQUINA OFFLINE!"
+            });
+        }
+        // ==============================
+        // VALOR DO CRÉDITO
+        // ==============================
+        const valorCredito = String(req.body.valor);
+        if (!valorCredito ||
+            Number.isNaN(parseFloat(valorCredito)) ||
+            parseFloat(valorCredito) <= 0) {
+            return res.status(400).json({
+                retorno: "VALOR DE CRÉDITO INVÁLIDO"
+            });
+        }
+        // ==============================
+        // GRAVA O CRÉDITO NA MÁQUINA
+        // ==============================
+        await prisma.pix_Maquina.update({
+            where: {
+                id: maquina.id
+            },
+            data: {
+                valorDoPix: valorCredito,
+                metodoPagamento: "REMOTO",
+                ultimoPagamentoRecebido: new Date()
+            }
+        });
+        console.log(`
+========================================
+💰 CRÉDITO REMOTO CLIENTE
+========================================
+🏪 Máquina: ${maquina.nome}
+🆔 ID: ${maquina.id}
+💵 Valor: ${valorCredito}
+💳 Método: REMOTO
+========================================
+`);
+        // ==============================
+        // REGISTRA QUEM FEZ O CRÉDITO
+        // ==============================
+        const cliente = await prisma.pix_Cliente.findUnique({
+            where: {
+                id: req.userId,
+            },
+        });
+        const ip = req.headers["x-forwarded-for"] ||
+            req.socket.remoteAddress;
+        registrarCreditoRemoto(cliente?.email || "", ip, maquina.id, req.body.valor);
+        // ==============================
+        // NOTIFICAÇÃO
+        // ==============================
+        if (NOTIFICACOES_CREDITO_REMOTO) {
+            notificarDiscord(DISCORD_WEBHOOKS.CREDITO_REMOTO, `CRÉDITO REMOTO DE R$: ${valorCredito} em ${maquina.nome} de ${maquina.cliente?.nome}`, `Enviado pelo cliente: ${req.userId}`);
+        }
+        // ==============================
+        // TENTA ENVIAR PELO WEBSOCKET
+        // ==============================
+        void tentarEnviarCreditoViaWs(maquina.id, {
+            source: "CREDITO_REMOTO_CLIENTE"
+        });
+        // ==============================
+        // RESPOSTA
+        // ==============================
+        return res.status(200).json({
+            retorno: "CREDITO INSERIDO"
+        });
     }
     catch (err) {
-        console.log(err);
-        return res.status(500).json({ "retorno": "ERRO: see: console > view logs" });
+        console.log("Erro no crédito remoto:", err);
+        return res.status(500).json({
+            retorno: "ERRO: see: console > view logs"
+        });
     }
 });
 //login ADM 
@@ -2490,6 +3052,42 @@ app.post("/login-cliente", async (req, res) => {
     catch (error) {
         const { message } = error;
         return res.status(403).json({ error: message });
+    }
+});
+app.post("/registrar-fcm-token", async (req, res) => {
+    try {
+        const authHeader = req.headers.authorization;
+        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+            return res.status(401).json({ error: "Token de autenticação não informado" });
+        }
+        const jwtToken = authHeader.substring(7);
+        const decoded = jsonwebtoken_1.default.verify(jwtToken, SECRET);
+        const fcmToken = String(req.body.token || "").trim();
+        if (!fcmToken) {
+            return res.status(400).json({ error: "FCM token não informado" });
+        }
+        await prisma.pix_FcmToken.upsert({
+            where: {
+                token: fcmToken,
+            },
+            update: {
+                clienteId: decoded.userId,
+            },
+            create: {
+                token: fcmToken,
+                clienteId: decoded.userId,
+            },
+        });
+        console.log(`🔔 FCM registrado para cliente ${decoded.userId}`);
+        return res.json({
+            success: true,
+        });
+    }
+    catch (error) {
+        console.error("❌ Erro ao registrar FCM:", error);
+        return res.status(401).json({
+            error: "Não foi possível registrar o FCM token",
+        });
     }
 });
 app.post("/login-funcionario", async (req, res) => {
@@ -2751,7 +3349,8 @@ app.get("/maquinas-adm", verifyJwtPessoa, async (req, res) => {
                         pulso: maquina.valorDoPulso,
                         nivelDeSinal: maquina.nivelDeSinal,
                         bonusAtivo: maquina.bonusAtivo,
-                        bonusRegras: maquina.bonusRegras
+                        bonusRegras: maquina.bonusRegras,
+                        bloqueadaMensalidade: maquina.bloqueadaMensalidade
                     });
                 }
                 else {
@@ -2772,7 +3371,8 @@ app.get("/maquinas-adm", verifyJwtPessoa, async (req, res) => {
                         pulso: maquina.valorDoPulso,
                         nivelDeSinal: maquina.nivelDeSinal,
                         bonusAtivo: maquina.bonusAtivo,
-                        bonusRegras: maquina.bonusRegras
+                        bonusRegras: maquina.bonusRegras,
+                        bloqueadaMensalidade: maquina.bloqueadaMensalidade
                     });
                 }
             }
@@ -2799,6 +3399,8 @@ app.get("/clientes-analise", verifyJwtPessoa, async (req, res) => {
             select: {
                 id: true,
                 nome: true,
+                cpf: true,
+                telefone: true,
                 email: true,
                 dataInclusao: true,
                 ultimoAcesso: true,
@@ -2842,6 +3444,61 @@ app.get("/clientes-analise", verifyJwtPessoa, async (req, res) => {
         return res.status(500).json({ "retorno": "ERRO" });
     }
 });
+app.put("/clientes/:id/atualizar-cadastro", verifyJwtPessoa, async (req, res) => {
+    try {
+        const { id } = req.params;
+        const { cpf, telefone } = req.body;
+        const cliente = await prisma.pix_Cliente.findFirst({
+            where: {
+                id,
+                pessoaId: req.userId,
+            },
+            select: {
+                id: true,
+            },
+        });
+        if (!cliente) {
+            return res.status(404).json({
+                error: "Cliente não encontrado.",
+            });
+        }
+        const cpfLimpo = String(cpf ?? "").replace(/\D/g, "");
+        const telefoneLimpo = String(telefone ?? "").replace(/\D/g, "");
+        if (cpfLimpo && cpfLimpo.length !== 11) {
+            return res.status(400).json({
+                error: "CPF deve conter 11 dígitos.",
+            });
+        }
+        if (telefoneLimpo &&
+            ![10, 11].includes(telefoneLimpo.length)) {
+            return res.status(400).json({
+                error: "Telefone inválido.",
+            });
+        }
+        const clienteAtualizado = await prisma.pix_Cliente.update({
+            where: {
+                id: cliente.id,
+            },
+            data: {
+                cpf: cpfLimpo || null,
+                telefone: telefoneLimpo || null,
+            },
+            select: {
+                id: true,
+                nome: true,
+                cpf: true,
+                telefone: true,
+            },
+        });
+        return res.status(200).json(clienteAtualizado);
+    }
+    catch (err) {
+        console.error("Erro ao atualizar cadastro:", err);
+        return res.status(500).json({
+            error: "Erro ao atualizar cadastro do cliente.",
+        });
+    }
+});
 app.get("/clientes", verifyJwtPessoa, async (req, res) => {
     console.log(`${req.userId} acessou a rota que busca todos os clientes e suas máquinas.`);
     try {
@@ -2852,6 +3509,8 @@ app.get("/clientes", verifyJwtPessoa, async (req, res) => {
             select: {
                 id: true,
                 nome: true,
+                cpf: true,
+                telefone: true,
                 email: true,
                 dataInclusao: true,
                 ultimoAcesso: true,
@@ -2872,6 +3531,7 @@ app.get("/clientes", verifyJwtPessoa, async (req, res) => {
                         ultimoPagamentoRecebido: true,
                         ultimaRequisicao: true,
                         maquininha_serial: true, // Adiciona maquininha_serial
+                        bloqueadaMensalidade: true,
                     },
                 },
             },
@@ -3429,6 +4089,10 @@ app.post("/rota-recebimento-mercado-pago-dinamica/:id", async (req, res) => {
     let pagamentoProcessado = false;
     let tokenClienteGlobal = "";
     try {
+        if (req.query.id === "123456") {
+            console.log("IPN recebido:", { id: req.query.id, topic: req.query.topic });
+            res.sendStatus(200);
+        }
         console.log("📩 Webhook recebido:", JSON.stringify(req.body));
         // ================================
         // 1. PAYMENT ID
@@ -3532,6 +4196,38 @@ app.post("/rota-recebimento-mercado-pago-dinamica/:id", async (req, res) => {
             return res.status(200).end();
         }
         // ================================
+        // BLOQUEIO INDIVIDUAL POR MENSALIDADE
+        // ================================
+        if (maquina.bloqueadaMensalidade === true) {
+            console.log(`🚫 Pagamento em máquina bloqueada: ${maquina.nome} (${maquina.id})`);
+            const jaEstornado = await prisma.pix_Pagamento.findFirst({
+                where: {
+                    mercadoPagoId: paymentId,
+                    estornado: true
+                }
+            });
+            if (!jaEstornado) {
+                const estorno = await estornarMP(paymentId, tokenCliente, "maquina bloqueada por mensalidade");
+                if (!estorno) {
+                    console.log("❌ Falha no estorno da máquina bloqueada");
+                    processandoWebhooks.delete(paymentId);
+                    return res.status(200).end();
+                }
+                await prisma.pix_Pagamento.create({
+                    data: {
+                        maquinaId: maquina.id,
+                        valor: valor.toString(),
+                        mercadoPagoId: paymentId,
+                        motivoEstorno: "maquina bloqueada",
+                        estornado: true,
+                        clienteId: cliente.id
+                    }
+                });
+            }
+            processandoWebhooks.delete(paymentId);
+            return res.status(200).end();
+        }
+        // ================================
         // 7. MÁQUINA OFFLINE
         // ================================
         let status = "ONLINE";
@@ -3553,18 +4249,23 @@ app.post("/rota-recebimento-mercado-pago-dinamica/:id", async (req, res) => {
                 }
             });
             if (!jaEstornado) {
-                await estornarMP(paymentId, tokenCliente, "maquina offline");
-            }
-            await prisma.pix_Pagamento.create({
-                data: {
-                    maquinaId: maquina.id,
-                    valor: valor.toString(),
-                    mercadoPagoId: paymentId,
-                    motivoEstorno: "maquina offline",
-                    estornado: true,
-                    clienteId: cliente.id
+                const estorno = await estornarMP(paymentId, tokenCliente, "maquina offline");
+                if (!estorno) {
+                    console.log("❌ Estorno de máquina offline falhou, pagamento não será marcado como estornado");
+                    processandoWebhooks.delete(paymentId);
+                    return res.status(200).end();
                 }
-            });
+                await prisma.pix_Pagamento.create({
+                    data: {
+                        maquinaId: maquina.id,
+                        valor: valor.toString(),
+                        mercadoPagoId: paymentId,
+                        motivoEstorno: "maquina offline",
+                        estornado: true,
+                        clienteId: cliente.id
+                    }
+                });
+            }
             processandoWebhooks.delete(paymentId);
             return res.status(200).end();
         }
@@ -4145,8 +4846,12 @@ app.post("/rota-recebimento-especie/:id", async (req, res) => {
         const value = Number(req.query.valor);
         if (maquina) {
             const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
-            if (bloqueio.bloqueado) {
-                return res.status(403).json({ retorno: "CLIENTE_BLOQUEADO" });
+            if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
+                return res.status(403).json({
+                    retorno: bloqueio.bloqueado
+                        ? "CLIENTE_BLOQUEADO"
+                        : "MAQUINA_BLOQUEADA_MENSALIDADE"
+                });
             }
             const ip = String(req.headers['x-forwarded-for'] || req.socket.remoteAddress || req.ip || "");
             console.log(`
@@ -4284,9 +4989,15 @@ app.post("/decrementar-estoque/:id/", async (req, res) => {
                     data: { gt: referenciaData, lte: new Date() },
                     OR: [
                         { tipo: "bank_transfer" },
+                        { tipo: "11" },
+                        { tipo: "account_money" },
                         { tipo: "credit_card" },
+                        { tipo: "prepaid_card" },
+                        { tipo: "1" },
                         { tipo: "debit_card" },
-                        { tipo: "CASH" }
+                        { tipo: "8" },
+                        { tipo: "CASH" },
+                        { mercadoPagoId: "CASH" }
                     ]
                 }
             });
@@ -4314,16 +5025,22 @@ app.post("/decrementar-estoque/:id/", async (req, res) => {
                 }
             });
             console.log(`Saída de ${quantidade} produto(s) registrada para o cliente ${maquina.cliente?.nome} com valor acumulado de R$ ${valorAcumulado.toFixed(2)}`);
+            await enviarPushCliente(String(maquina.clienteId), "Saiu Produto 🎁", `${maquina.nome || "Máquina"} liberou ${quantidade} produto(s) • Gerou R$ ${valorAcumulado.toFixed(2).replace(".", ",")}`, "SAIDA_PRODUTO");
         }
         if (NOTIFICACOES_ESTOQUE) {
             notificarDiscord(DISCORD_WEBHOOKS.ESTOQUE, `Item vendido.`, ` Maquina: ${maquina?.nome}. Maquina: ${maquina?.descricao}. Cliente: ${maquina.cliente?.nome}`);
         }
         console.log("Estoque atualizado");
-        return res.status(200).json({ "Estoque atual": `${novoEstoque}`, "Registro": "Saída de produto registrada no relatório do cliente" });
+        return res.status(200).json({
+            "Estoque atual": `${novoEstoque}`,
+            "Registro": "Saída de produto registrada no relatório do cliente"
+        });
     }
     catch (error) {
         console.error("Error updating stock:", error);
-        return res.status(404).json({ "retorno": "Erro ao tentar atualizar estoque" });
+        return res.status(404).json({
+            "retorno": "Erro ao tentar atualizar estoque"
+        });
     }
 });
 //id da maquina e a quantidade ?valor=1
@@ -4411,7 +5128,7 @@ app.get("/pagamentos/:maquinaId", verifyJWT, async (req, res) => {
                 valorCartaoDebito += parseFloat(pagamento.valor);
                 taxaCartaoDebito += parseFloat(pagamento.taxas);
             }
-            else if (pagamento.tipo === "credit_card") {
+            else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card") {
                 valorCartaoCredito += parseFloat(pagamento.valor);
                 taxaCartaoCredito += parseFloat(pagamento.taxas);
             }
@@ -4454,29 +5171,35 @@ app.get("/pagamentos/:maquinaId", verifyJWT, async (req, res) => {
 app.get("/pagamentos-adm/:maquinaId", verifyJwtPessoa, async (req, res) => {
     console.log(`${req.params.maquinaId} acessou a rota de pagamentos.`);
     try {
-        var totalRecebido = 0.0;
-        var totalEstornado = 0.0;
         var totalEspecie = 0.0;
-        // const uuidRegex =
-        //   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-        // const maquinaParam = String(req.params.maquinaId ?? "").trim();
-        // const maquina = uuidRegex.test(maquinaParam)
-        //   ? await prisma.pix_Maquina.findUnique({ where: { id: maquinaParam } })
-        //   : await prisma.pix_Maquina.findFirst({ where: { maquininha_serial: maquinaParam } });
-        const maquina = await prisma.pix_Maquina.findUnique({ where: { id: req.params.maquinaId } });
-        // console.log(uuidRegex.test(maquinaParam))
-        if (!maquina) {
-            return res.status(404).json({ error: 'Máquina não encontrada' });
-        }
+        let valorTotal = 0;
+        let valorPix = 0;
+        let valorCartaoCredito = 0;
+        let valorCartaoDebito = 0;
+        let valorCash = 0;
+        let qtd = 0;
+        let totalBruto = 0;
+        let totalLiquido = 0;
+        let taxaPix = 0;
+        let taxaCartaoCredito = 0;
+        let taxaCartaoDebito = 0;
         const pagamentos = await prisma.pix_Pagamento.findMany({
             where: {
-                maquinaId: maquina.id,
+                maquinaId: req.params.maquinaId,
                 removido: false
             },
             orderBy: {
-                data: 'desc',
+                data: 'desc', // 'desc' para ordem decrescente (da mais recente para a mais antiga)
             }
         });
+        const maquina = await prisma.pix_Maquina.findUnique({
+            where: {
+                id: req.params.maquinaId
+            }
+        });
+        if (!maquina) {
+            return res.status(404).json({ error: 'Máquina não encontrada' });
+        }
         // Verifica se o estoque está definido e retorna seu valor
         const estoque = maquina.estoque !== null ? maquina.estoque : '--';
         let totalSemEstorno = 0;
@@ -4486,6 +5209,23 @@ app.get("/pagamentos-adm/:maquinaId", verifyJwtPessoa, async (req, res) => {
             if (pagamento?.tipo === "SAIDA_PRODUTO" || pagamento?.mercadoPagoId === "saiu premio") {
                 continue;
             }
+            if (pagamento.tipo === "CASH" || pagamento.mercadoPagoId === "CASH") {
+                totalEspecie += parseFloat(pagamento.valor);
+                valorCash += parseFloat(pagamento.valor);
+            }
+            else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money") {
+                valorPix += parseFloat(pagamento.valor);
+                taxaPix += parseFloat(pagamento.taxas);
+            }
+            else if (pagamento.tipo === "debit_card") {
+                valorCartaoDebito += parseFloat(pagamento.valor);
+                taxaCartaoDebito += parseFloat(pagamento.taxas);
+            }
+            else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card") {
+                valorCartaoCredito += parseFloat(pagamento.valor);
+                taxaCartaoCredito += parseFloat(pagamento.taxas);
+            }
+            qtd += 1;
             const valor = parseFloat(pagamento.valor);
             if (pagamento.estornado === false) {
                 totalSemEstorno += valor;
@@ -4493,19 +5233,27 @@ app.get("/pagamentos-adm/:maquinaId", verifyJwtPessoa, async (req, res) => {
             else {
                 totalComEstorno += valor;
             }
+            totalBruto = totalComEstorno + totalSemEstorno;
+            totalLiquido = totalSemEstorno - (taxaCartaoCredito + taxaCartaoDebito + taxaPix);
         }
-        const especie = await prisma.pix_Pagamento.findMany({
-            where: {
-                maquinaId: maquina.id,
-                removido: false,
-                mercadoPagoId: `CASH`
-            }
+        return res.status(200).json({
+            "totalBruto": totalBruto,
+            "totalLiquido": totalLiquido,
+            "total": totalSemEstorno,
+            "estornos": totalComEstorno,
+            "cash": totalEspecie,
+            "estoque": estoque,
+            "store_id": maquina.store_id,
+            "pagamentos": pagamentos,
+            "totalCash": valorCash,
+            "totalPix": valorPix,
+            "totalCartaoCredito": valorCartaoCredito,
+            "totalCartaoDebito": valorCartaoDebito,
+            "taxaCartaoCredito": taxaCartaoCredito,
+            "taxaCartaoDebito": taxaCartaoDebito,
+            "taxaPix": taxaPix,
+            "qtd": qtd
         });
-        for (const e of especie) {
-            const valor = parseFloat(e.valor);
-            totalEspecie += valor;
-        }
-        return res.status(200).json({ "total": totalSemEstorno, "estornos": totalComEstorno, "cash": totalEspecie, "estoque": estoque, "store_id": maquina.store_id, "pagamentos": pagamentos });
     }
     catch (err) {
         console.log(err);
@@ -4514,8 +5262,6 @@ app.get("/pagamentos-adm/:maquinaId", verifyJwtPessoa, async (req, res) => {
 });
 //RELATORIO DE PAGAMENTOS POR MÁQUINA POR PERÍODO
 app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req, res) => {
-    console.log(req.body.dataInicio);
-    console.log(req.body.dataFim);
     try {
         var totalEspecie = 0.0;
         let valorTotal = 0;
@@ -4600,15 +5346,15 @@ app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req, res) => {
                 totalEspecie += parseFloat(pagamento.valor);
                 valorCash += parseFloat(pagamento.valor);
             }
-            else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money") {
+            else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money" || pagamento.tipo === "digital_currency" || pagamento.tipo === "11") {
                 valorPix += parseFloat(pagamento.valor);
                 taxaPix += parseFloat(pagamento.taxas);
             }
-            else if (pagamento.tipo === "debit_card") {
+            else if (pagamento.tipo === "debit_card" || pagamento.tipo === "8") {
                 valorCartaoDebito += parseFloat(pagamento.valor);
                 taxaCartaoDebito += parseFloat(pagamento.taxas);
             }
-            else if (pagamento.tipo === "credit_card") {
+            else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card" || pagamento.tipo === "1") {
                 valorCartaoCredito += parseFloat(pagamento.valor);
                 taxaCartaoCredito += parseFloat(pagamento.taxas);
             }
@@ -4623,17 +5369,6 @@ app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req, res) => {
             totalBruto = totalComEstorno + totalSemEstorno;
             totalLiquido = totalSemEstorno - (taxaCartaoCredito + taxaCartaoDebito + taxaPix);
         }
-        // const especie = await prisma.pix_Pagamento.findMany({
-        //   where: {
-        //     maquinaId: req.params.maquinaId,
-        //     removido: false,
-        //     mercadoPagoId: `CASH`
-        //   }
-        // });
-        // for (const e of especie) {
-        //   const valor = parseFloat(e.valor);
-        //   totalEspecie += valor;
-        // }
         return res.status(200).json({
             "totalBruto": totalBruto,
             "totalLiquido": totalLiquido,
@@ -4660,11 +5395,24 @@ app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req, res) => {
 //RELATORIO DE PAGAMENTOS POR MÁQUINA POR PERÍODO
 app.post("/pagamentos-periodo-adm/:maquinaId", verifyJwtPessoa, async (req, res) => {
     try {
-        var totalRecebido = 0.0;
-        var totalEstornado = 0.0;
         var totalEspecie = 0.0;
+        let valorTotal = 0;
+        let valorPix = 0;
+        let valorCartaoCredito = 0;
+        let valorCartaoDebito = 0;
+        let valorCash = 0;
+        let qtd = 0;
+        let totalBruto = 0;
+        let totalLiquido = 0;
+        let taxaPix = 0;
+        let taxaCartaoCredito = 0;
+        let taxaCartaoDebito = 0;
         let dataInicio;
         let dataFim;
+        const dataInicioFiltro = new Date(req.body.dataInicio);
+        const dataFimFiltro = new Date(req.body.dataFim);
+        let inicioFiltro = null;
+        let fimFiltro = null;
         if (!req.body.dataInicio || !req.body.dataFim) {
             dataFim = new Date();
             dataInicio = new Date();
@@ -4673,27 +5421,39 @@ app.post("/pagamentos-periodo-adm/:maquinaId", verifyJwtPessoa, async (req, res)
         else {
             dataInicio = new Date(req.body.dataInicio);
             dataFim = new Date(req.body.dataFim);
-            if (isNaN(dataInicio.getTime()) || isNaN(dataFim.getTime())) {
-                return res.status(400).json({
-                    error: "Datas inválidas",
-                });
-            }
+            // if (isNaN(dataInicio.getTime()) || isNaN(dataFim.getTime())) {
+            //   return res.status(400).json({
+            //     error: "Datas inválidas",
+            //   });
+            // }
+            // Trabalha 100% em UTC (sem gambiarra)
+            //       const inicio = new Date(Date.UTC(
+            //         dataInicioFiltro.getUTCFullYear(),
+            //         dataInicioFiltro.getUTCMonth(),
+            //         dataInicioFiltro.getUTCDate(),
+            //         0, 0, 0, 0
+            //       ));
+            //       const fim = new Date(Date.UTC(
+            //         dataFimFiltro.getUTCFullYear(),
+            //         dataFimFiltro.getUTCMonth(),
+            //         dataFimFiltro.getUTCDate(),
+            //         23, 59, 59, 999
+            //       ));
+            //       dataInicio = inicio;
+            //       dataFim = fim;
+            //       console.log("FILTRO UTC INICIO:", inicio.toISOString());
+            // console.log("FILTRO UTC FIM:", fim.toISOString());
+            // dataInicio = new Date(req.body.dataInicio);
+            // dataInicio.setHours(0, 0, 0, 0);
+            // dataFim = new Date(req.body.dataFim);
+            // dataFim.setHours(0, 0, 0, 0);
+            // dataFim.setDate(dataFim.getDate() + 1);
         }
-        dataInicio.setHours(0, 0, 0, 0);
-        dataFim.setHours(23, 59, 59, 999);
-        // const uuidRegex =
-        //   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-        // const maquinaParam = String(req.params.maquinaId ?? "").trim();
-        // const maquina = uuidRegex.test(maquinaParam)
-        //   ? await prisma.pix_Maquina.findUnique({ where: { id: maquinaParam } })
-        //   : await prisma.pix_Maquina.findFirst({ where: { maquininha_serial: maquinaParam } });
-        const maquina = await prisma.pix_Maquina.findUnique({ where: { id: req.params.maquinaId } });
-        if (!maquina) {
-            return res.status(404).json({ error: "Máquina não encontrada" });
-        }
+        // dataInicio.setUTCHours(0, 0, 0, 0);
+        // dataFim.setUTCHours(23, 59, 59, 999);
         const pagamentos = await prisma.pix_Pagamento.findMany({
             where: {
-                maquinaId: maquina.id,
+                maquinaId: req.params.maquinaId,
                 data: {
                     gte: dataInicio,
                     lte: dataFim,
@@ -4703,16 +5463,34 @@ app.post("/pagamentos-periodo-adm/:maquinaId", verifyJwtPessoa, async (req, res)
                 data: 'desc',
             }
         });
+        const maquina = await prisma.pix_Maquina.findUnique({
+            where: {
+                id: req.params.maquinaId
+            }
+        });
         let totalSemEstorno = 0;
         let totalComEstorno = 0;
         for (const pagamento of pagamentos) {
             if (pagamento?.tipo === "SAIDA_PRODUTO" || pagamento?.mercadoPagoId === "saiu premio") {
                 continue;
             }
-            if (pagamento.mercadoPagoId === 'CASH') {
-                const valor = parseFloat(pagamento.valor);
-                totalEspecie += valor;
+            if (pagamento.tipo === "CASH" || pagamento.mercadoPagoId === "CASH") {
+                totalEspecie += parseFloat(pagamento.valor);
+                valorCash += parseFloat(pagamento.valor);
             }
+            else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money" || pagamento.tipo === "digital_currency" || pagamento.tipo === "11") {
+                valorPix += parseFloat(pagamento.valor);
+                taxaPix += parseFloat(pagamento.taxas);
+            }
+            else if (pagamento.tipo === "debit_card" || pagamento.tipo === "8") {
+                valorCartaoDebito += parseFloat(pagamento.valor);
+                taxaCartaoDebito += parseFloat(pagamento.taxas);
+            }
+            else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card" || pagamento.tipo === "1") {
+                valorCartaoCredito += parseFloat(pagamento.valor);
+                taxaCartaoCredito += parseFloat(pagamento.taxas);
+            }
+            qtd += 1;
             const valor = parseFloat(pagamento.valor);
             if (pagamento.estornado === false) {
                 totalSemEstorno += valor;
@@ -4720,23 +5498,26 @@ app.post("/pagamentos-periodo-adm/:maquinaId", verifyJwtPessoa, async (req, res)
             else {
                 totalComEstorno += valor;
             }
+            totalBruto = totalComEstorno + totalSemEstorno;
+            totalLiquido = totalSemEstorno - (taxaCartaoCredito + taxaCartaoDebito + taxaPix);
         }
-        // const especie = await prisma.pix_Pagamento.findMany({
-        //   where: {
-        //     maquinaId: req.params.maquinaId,
-        //     removido: false,
-        //     mercadoPagoId: `CASH`,
-        //     data: {
-        //       gte: dataInicio,
-        //       lte: dataFim,
-        //     },
-        //   }
-        // });
-        // for (const e of especie) {
-        //   const valor = parseFloat(e.valor);
-        //   totalEspecie += valor;
-        // }
-        return res.status(200).json({ "total": totalSemEstorno, "estornos": totalComEstorno, "cash": totalEspecie, "store_id": maquina?.store_id, "pagamentos": pagamentos });
+        return res.status(200).json({
+            "totalBruto": totalBruto,
+            "totalLiquido": totalLiquido,
+            "total": totalSemEstorno,
+            "estornos": totalComEstorno,
+            "cash": totalEspecie,
+            "store_id": maquina?.store_id,
+            "pagamentos": pagamentos,
+            "totalCash": valorCash,
+            "totalPix": valorPix,
+            "totalCartaoCredito": valorCartaoCredito,
+            "totalCartaoDebito": valorCartaoDebito,
+            "taxaCartaoCredito": taxaCartaoCredito,
+            "taxaCartaoDebito": taxaCartaoDebito,
+            "taxaPix": taxaPix,
+            "qtd": qtd
+        });
     }
     catch (err) {
         console.log(err);
@@ -4796,12 +5577,9 @@ app.delete('/delete-pagamento-cliente/:pagamentoId', verifyJWT, async (req, res)
     const pagamentoId = req.params.pagamentoId;
     try {
         // Deletar um pagamento específico
-        await prisma.pix_Pagamento.update({
+        await prisma.pix_Pagamento.delete({
             where: {
                 id: pagamentoId
-            },
-            data: {
-                removido: true
             }
         });
         res.status(200).json({ message: `Pagamento ${pagamentoId} removido com sucesso.` });
@@ -4925,7 +5703,10 @@ app.post("/relatorio-02-taxas", verifyJWT, async (req, res) => {
             const pagamentos = await prisma.pix_Pagamento.findMany({
                 where: {
                     maquinaId: req.body.maquinaId,
-                    tipo: "credit_card",
+                    OR: [
+                        { tipo: "credit_card" },
+                        { tipo: "prepaid_card" }
+                    ],
                     estornado: false,
                     data: {
                         gte: new Date(req.body.dataInicio),
@@ -4987,7 +5768,10 @@ app.post("/relatorio-02-taxas-adm", verifyJwtPessoa, async (req, res) => {
             const pagamentos = await prisma.pix_Pagamento.findMany({
                 where: {
                     maquinaId: req.body.maquinaId,
-                    tipo: "credit_card",
+                    OR: [
+                        { tipo: "credit_card" },
+                        { tipo: "prepaid_card" }
+                    ],
                     estornado: false
                 }
             });
@@ -5044,7 +5828,10 @@ app.post("/relatorio-03-pagamentos", verifyJWT, async (req, res) => {
         const pagamentos_credito = await prisma.pix_Pagamento.findMany({
             where: {
                 maquinaId: req.body.maquinaId,
-                tipo: "credit_card",
+                OR: [
+                    { tipo: "credit_card" },
+                    { tipo: "prepaid_card" }
+                ],
                 estornado: false,
                 data: {
                     gte: new Date(req.body.dataInicio),
@@ -5138,7 +5925,10 @@ app.post("/relatorio-03-pagamentos-adm", verifyJwtPessoa, async (req, res) => {
         const pagamentos_credito = await prisma.pix_Pagamento.findMany({
             where: {
                 maquinaId: req.body.maquinaId,
-                tipo: "credit_card",
+                OR: [
+                    { tipo: "credit_card" },
+                    { tipo: "prepaid_card" }
+                ],
                 estornado: false,
                 data: {
                     gte: new Date(req.body.dataInicio),
@@ -6536,6 +7326,7 @@ app.get("/machines-client", verifyJWT, async (req, res) => {
                 status = "PAGAMENTO_RECENTE";
             }
             const maquinaDetalhe = {
+                id: maquina.id,
                 status: status,
                 nome: maquina.nome,
                 descricao: maquina.descricao || "",
@@ -6543,6 +7334,7 @@ app.get("/machines-client", verifyJWT, async (req, res) => {
                 maquininha_serial: maquina.maquininha_serial || "",
                 bonusAtivo: maquina.bonusAtivo,
                 bonusRegras: maquina.bonusRegras,
+                bloqueadaMensalidade: maquina.bloqueadaMensalidade,
                 clienteNome: maquina.cliente ? maquina.cliente.nome : "",
             };
             // Separando as máquinas em online e offline
@@ -6580,10 +7372,12 @@ app.get("/payments-client", verifyJWT, async (req, res) => {
         let totalSemEstorno = 0;
         let totalBruto = 0;
         let totalLiquido = 0;
+        let taxaPix = 0;
+        let taxaCartaoCredito = 0;
+        let taxaCartaoDebito = 0;
         // Filtros dinâmicos
         const where = {
             maquinaId: maquinaId,
-            estornado: false,
         };
         const agora = new Date();
         let inicioFiltro = null;
@@ -6633,7 +7427,7 @@ app.get("/payments-client", verifyJWT, async (req, res) => {
                 inicioFiltro = new Date(hoje);
                 inicioFiltro.setDate(inicioFiltro.getDate() - 7);
                 fimFiltro = new Date(hoje);
-                fimFiltro.setDate(fimFiltro.getDate() + 1); // exclusivo
+                fimFiltro.setDate(fimFiltro.getDate());
                 break;
             }
             case "mesatual": {
@@ -6641,7 +7435,7 @@ app.get("/payments-client", verifyJWT, async (req, res) => {
                 inicioFiltro = new Date(agora.getFullYear(), agora.getMonth(), 1);
                 inicioFiltro.setHours(0, 0, 0, 0);
                 // Primeiro dia do próximo mês (exclusivo)
-                fimFiltro = new Date(agora.getFullYear(), agora.getMonth() + 1, 1);
+                fimFiltro = new Date(agora.getFullYear(), agora.getMonth(), 1);
                 fimFiltro.setHours(0, 0, 0, 0);
                 break;
             }
@@ -6664,7 +7458,7 @@ app.get("/payments-client", verifyJWT, async (req, res) => {
                 inicioFiltro.setHours(0, 0, 0, 0);
                 fimFiltro = new Date(dataFim);
                 fimFiltro.setHours(0, 0, 0, 0);
-                fimFiltro.setDate(fimFiltro.getDate() + 1); // exclusivo
+                fimFiltro.setDate(fimFiltro.getDate());
                 break;
             }
             case "todos":
@@ -6689,28 +7483,32 @@ app.get("/payments-client", verifyJWT, async (req, res) => {
             if (pagamento?.tipo === "SAIDA_PRODUTO" || pagamento?.mercadoPagoId === "saiu premio") {
                 continue;
             }
-            if (pagamento.tipo === "CASH") {
+            if (pagamento.tipo === "CASH" || pagamento.mercadoPagoId === "CASH") {
                 valorCash += parseFloat(pagamento.valor);
             }
-            else if (pagamento.tipo === "bank_transfer") {
+            else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money" || pagamento.tipo === "digital_currency" || pagamento.tipo === "11") {
                 valorPix += parseFloat(pagamento.valor);
+                taxaPix += parseFloat(pagamento.taxas);
             }
-            else if (pagamento.tipo === "debit_card") {
+            else if (pagamento.tipo === "debit_card" || pagamento.tipo === "8") {
                 valorCartaoDebito += parseFloat(pagamento.valor);
+                taxaCartaoDebito += parseFloat(pagamento.taxas);
             }
-            else if (pagamento.tipo === "credit_card") {
+            else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card" || pagamento.tipo === "1") {
                 valorCartaoCredito += parseFloat(pagamento.valor);
+                taxaCartaoCredito += parseFloat(pagamento.taxas);
             }
             qtd += 1;
             valorTotal += parseFloat(pagamento.valor);
-            if (pagamento.estornado === true) {
-                totalEstorno += parseFloat(pagamento.valor);
+            const valor = parseFloat(pagamento.valor);
+            if (pagamento.estornado === false) {
+                totalSemEstorno += valor;
             }
             else {
-                totalSemEstorno += parseFloat(pagamento.valor);
+                totalEstorno += valor;
             }
             totalBruto = totalEstorno + totalSemEstorno;
-            totalLiquido = totalSemEstorno;
+            totalLiquido = totalSemEstorno - (taxaCartaoCredito + taxaCartaoDebito + taxaPix);
         }
         // Busca os 10 pagamentos mais recentes de acordo com os filtros aplicados e inclui nome e descrição da máquina
         const pagamentosRecentes = await prisma.pix_Pagamento.findMany({
@@ -6742,7 +7540,7 @@ app.get("/payments-client", verifyJWT, async (req, res) => {
         });
         // Retorna o somatório dos valores dos pagamentos e os 10 pagamentos mais recentes
         return res.status(200).json({
-            soma: valorTotal.toFixed(2), // Retorna o valor formatado com 2 casas decimais
+            soma: valorTotal.toFixed(2),
             totalBruto: totalBruto,
             totalLiquido: totalLiquido,
             totalEstorno: totalEstorno,
@@ -7414,6 +8212,15 @@ app.post("/usar-link/:id", async (req, res) => {
         if (!maquina) {
             return res.status(404).json({ error: "Máquina não encontrada" });
         }
+        const bloqueio = await getBloqueioCliente(String(maquina.clienteId));
+        if (bloqueio.bloqueado || maquina.bloqueadaMensalidade === true) {
+            console.log(`🚫 Link bloqueado: ${maquina.nome} (${maquina.id})`);
+            return res.status(403).json({
+                error: bloqueio.bloqueado
+                    ? "CLIENTE_BLOQUEADO"
+                    : "MAQUINA_BLOQUEADA_MENSALIDADE"
+            });
+        }
         // 🔥 VERIFICAR ANTES DE LIBERAR
         if (maquina.ultimaRequisicao) {
             const status = tempoOffline(maquina.ultimaRequisicao) > 60 ? "OFFLINE" : "ONLINE";
@@ -7493,6 +8300,691 @@ app.get("/link/:id", async (req, res) => {
         return res.status(500).json({ error: "Erro ao buscar link" });
     }
 });
+// =====================================
+// IKPAY - LISTAR MENSALIDADES
+// =====================================
+// Também deve ser usado somente em rota
+// protegida por autorização administrativa.
+async function listarMensalidadesAdmin(req, res) {
+    try {
+        const mensalidades = await prisma.pix_PagamentoCliente.findMany({
+            orderBy: {
+                dataDeVencimento: "desc",
+            },
+            select: {
+                id: true,
+                clienteId: true,
+                valor: true,
+                status: true,
+                dataDeVencimento: true,
+                dataDoPagamento: true,
+                Pix_Cliente: {
+                    select: {
+                        nome: true,
+                        ativo: true,
+                    },
+                },
+            },
+        });
+        return res.json({
+            sucesso: true,
+            mensalidades,
+        });
+    }
+    catch (erro) {
+        console.error("Erro ao listar mensalidades:", erro);
+        return res.status(500).json({
+            erro: "Erro ao consultar mensalidades",
+        });
+    }
+}
+async function verificarAdministradorAtivo(req, res, next) {
+    try {
+        const administrador = await prisma.pix_Pessoa.findUnique({
+            where: { id: req.userId },
+            select: { id: true },
+        });
+        if (!administrador) {
+            res.status(403).json({
+                erro: "Acesso exclusivo do administrador",
+            });
+            return;
+        }
+        next();
+    }
+    catch (erro) {
+        console.error("Erro ao verificar administrador:", erro);
+        res.status(500).json({
+            erro: "Erro ao validar acesso administrativo",
+        });
+    }
+}
+// =====================================
+// IKPAY - CONFIRMAR PAGAMENTO MENSALIDADE
+// =====================================
+// =====================================
+// IKPAY - CONFIRMAR PAGAMENTO MENSALIDADE
+// =====================================
+async function confirmarPagamentoMensalidade(req, res) {
+    try {
+        const { id } = req.params;
+        if (!id || typeof id !== "string") {
+            return res.status(400).json({
+                erro: "ID da mensalidade inválido",
+            });
+        }
+        const resultado = await prisma.$transaction(async (tx) => {
+            // Primeiro identifica o cliente da mensalidade.
+            const referencia = await tx.pix_PagamentoCliente.findUnique({
+                where: { id },
+                select: {
+                    clienteId: true,
+                },
+            });
+            if (!referencia) {
+                return {
+                    tipo: "NAO_ENCONTRADA",
+                };
+            }
+            // Mesmo bloqueio usado no cadastro de extras
+            // e na geração automática das mensalidades.
+            await tx.$queryRaw `
+          SELECT "id"
+          FROM "Pix_Cliente"
+          WHERE "id" = ${referencia.clienteId}
+          FOR UPDATE
+        `;
+            // Confere novamente o status após obter o bloqueio.
+            const mensalidade = await tx.pix_PagamentoCliente.findUnique({
+                where: { id },
+                select: {
+                    id: true,
+                    status: true,
+                },
+            });
+            if (!mensalidade) {
+                return {
+                    tipo: "NAO_ENCONTRADA",
+                };
+            }
+            if (mensalidade.status === "PAGO") {
+                return {
+                    tipo: "JA_PAGA",
+                };
+            }
+            if (!["ABERTO", "VENCIDO"].includes(mensalidade.status)) {
+                return {
+                    tipo: "STATUS_INVALIDO",
+                    status: mensalidade.status,
+                };
+            }
+            const agora = new Date();
+            const atualizacao = await tx.pix_PagamentoCliente.updateMany({
+                where: {
+                    id,
+                    status: {
+                        in: ["ABERTO", "VENCIDO"],
+                    },
+                },
+                data: {
+                    status: "PAGO",
+                    dataDoPagamento: agora,
+                },
+            });
+            if (atualizacao.count !== 1) {
+                throw new Error("Não foi possível confirmar a mensalidade");
+            }
+            // Confirma todas as parcelas extras vinculadas.
+            await tx.pix_ParcelaExtra.updateMany({
+                where: {
+                    mensalidadeId: id,
+                    dataPagamento: null,
+                },
+                data: {
+                    dataPagamento: agora,
+                },
+            });
+            return {
+                tipo: "CONFIRMADA",
+            };
+        }, {
+            timeout: 15000,
+        });
+        if (resultado.tipo === "NAO_ENCONTRADA") {
+            return res.status(404).json({
+                erro: "Mensalidade não encontrada",
+            });
+        }
+        if (resultado.tipo === "JA_PAGA") {
+            return res.json({
+                sucesso: true,
+                mensagem: "Mensalidade já estava paga",
+            });
+        }
+        if (resultado.tipo === "STATUS_INVALIDO") {
+            return res.status(409).json({
+                erro: "Esta mensalidade não pode ser confirmada",
+                status: resultado.status,
+            });
+        }
+        return res.json({
+            sucesso: true,
+            mensagem: "Mensalidade e parcelas extras confirmadas com sucesso",
+        });
+    }
+    catch (erro) {
+        console.error("Erro ao confirmar pagamento da mensalidade:", erro);
+        return res.status(500).json({
+            erro: "Erro interno ao confirmar pagamento",
+        });
+    }
+}
+// =====================================
+// COBRANÇAS EXTRAS - ADMINISTRADOR
+// =====================================
+function converterValorParaCentavos(valor) {
+    if (typeof valor !== "string" && typeof valor !== "number") {
+        return null;
+    }
+    let texto = String(valor).trim().replace(/\s/g, "");
+    if (texto.includes(",") && texto.includes(".")) {
+        texto = texto.replace(/\./g, "").replace(",", ".");
+    }
+    else {
+        texto = texto.replace(",", ".");
+    }
+    if (!/^\d+(\.\d{1,2})?$/.test(texto)) {
+        return null;
+    }
+    const [inteiros, decimais = ""] = texto.split(".");
+    const centavos = Number(inteiros) * 100 +
+        Number(decimais.padEnd(2, "0"));
+    if (!Number.isSafeInteger(centavos) ||
+        centavos <= 0 ||
+        centavos > 2147483647) {
+        return null;
+    }
+    return centavos;
+}
+function valorEmReais(centavos) {
+    return (centavos / 100).toFixed(2);
+}
+function competenciaValida(valor) {
+    if (typeof valor !== "string")
+        return false;
+    const resultado = /^(\d{4})-(0[1-9]|1[0-2])$/.exec(valor);
+    if (!resultado)
+        return false;
+    const ano = Number(resultado[1]);
+    return ano >= 2020 && ano <= 2100;
+}
+function adicionarMeses(competencia, meses) {
+    const [ano, mes] = competencia.split("-").map(Number);
+    const data = new Date(Date.UTC(ano, mes - 1 + meses, 1));
+    return (`${data.getUTCFullYear()}-` +
+        `${String(data.getUTCMonth() + 1).padStart(2, "0")}`);
+}
+function vencimentoDaCompetencia(competencia) {
+    const [ano, mes] = competencia.split("-").map(Number);
+    return new Date(Date.UTC(ano, mes - 1, 15, 12, 0, 0));
+}
+async function cadastrarCobrancaExtra(req, res) {
+    try {
+        const { clienteId, descricao, observacao, valorTotal, quantidadeParcelas, primeiraCompetencia, } = req.body || {};
+        const valorTotalCentavos = converterValorParaCentavos(valorTotal);
+        if (typeof clienteId !== "string" ||
+            !clienteId.trim() ||
+            typeof descricao !== "string" ||
+            !descricao.trim() ||
+            descricao.length > 300 ||
+            (observacao != null &&
+                (typeof observacao !== "string" ||
+                    observacao.length > 2000)) ||
+            !valorTotalCentavos ||
+            !Number.isInteger(quantidadeParcelas) ||
+            quantidadeParcelas < 1 ||
+            quantidadeParcelas > 60 ||
+            valorTotalCentavos < quantidadeParcelas ||
+            !competenciaValida(primeiraCompetencia)) {
+            return res.status(400).json({
+                erro: "Dados da cobrança extra inválidos",
+            });
+        }
+        const cliente = await prisma.pix_Cliente.findUnique({
+            where: { id: clienteId },
+            select: { id: true },
+        });
+        if (!cliente) {
+            return res.status(404).json({
+                erro: "Cliente não encontrado",
+            });
+        }
+        const base = Math.floor(valorTotalCentavos / quantidadeParcelas);
+        const resto = valorTotalCentavos % quantidadeParcelas;
+        const parcelas = Array.from({ length: quantidadeParcelas }, (_, indice) => ({
+            numeroParcela: indice + 1,
+            valorCentavos: base + (indice === quantidadeParcelas - 1 ? resto : 0),
+            competencia: adicionarMeses(primeiraCompetencia, indice),
+        }));
+        const resultado = await prisma.$transaction(async (tx) => {
+            // Serializa cadastros simultâneos para o mesmo cliente.
+            await tx.$queryRaw `
+          SELECT "id"
+          FROM "Pix_Cliente"
+          WHERE "id" = ${clienteId}
+          FOR UPDATE
+        `;
+            // Não permite adicionar parcelas em competências
+            // cuja mensalidade já foi paga ou substituída.
+            for (const parcela of parcelas) {
+                const vencimento = vencimentoDaCompetencia(parcela.competencia);
+                const mensalidade = await tx.pix_PagamentoCliente.findUnique({
+                    where: {
+                        clienteId_dataDeVencimento: {
+                            clienteId,
+                            dataDeVencimento: vencimento,
+                        },
+                    },
+                    select: {
+                        id: true,
+                        status: true,
+                    },
+                });
+                if (mensalidade &&
+                    !["ABERTO", "VENCIDO"].includes(mensalidade.status)) {
+                    throw new Error(`COMPETENCIA_FECHADA:${parcela.competencia}`);
+                }
+            }
+            const cobranca = await tx.pix_CobrancaExtra.create({
+                data: {
+                    clienteId,
+                    descricao: descricao.trim(),
+                    observacao: observacao?.trim() || null,
+                    valorTotalCentavos,
+                    quantidadeParcelas,
+                    parcelas: {
+                        create: parcelas,
+                    },
+                },
+                include: {
+                    parcelas: true,
+                },
+            });
+            // Inclui automaticamente as parcelas quando
+            // a mensalidade correspondente já existe.
+            for (const parcela of cobranca.parcelas) {
+                const vencimento = vencimentoDaCompetencia(parcela.competencia);
+                const mensalidade = await tx.pix_PagamentoCliente.findUnique({
+                    where: {
+                        clienteId_dataDeVencimento: {
+                            clienteId,
+                            dataDeVencimento: vencimento,
+                        },
+                    },
+                    select: {
+                        id: true,
+                        valor: true,
+                        status: true,
+                    },
+                });
+                if (!mensalidade)
+                    continue;
+                const valorAtual = converterValorParaCentavos(mensalidade.valor);
+                if (valorAtual === null) {
+                    throw new Error("VALOR_MENSALIDADE_INVALIDO");
+                }
+                const novoValor = valorAtual + parcela.valorCentavos;
+                await tx.pix_PagamentoCliente.update({
+                    where: { id: mensalidade.id },
+                    data: {
+                        valor: valorEmReais(novoValor),
+                        avisosEnviados: [],
+                    },
+                });
+                await tx.pix_ParcelaExtra.update({
+                    where: { id: parcela.id },
+                    data: {
+                        mensalidadeId: mensalidade.id,
+                    },
+                });
+            }
+            return cobranca;
+        }, {
+            timeout: 15000,
+        });
+        return res.status(201).json({
+            sucesso: true,
+            mensagem: "Cobrança extra cadastrada com sucesso",
+            cobranca: resultado,
+        });
+    }
+    catch (erro) {
+        if (typeof erro?.message === "string" &&
+            erro.message.startsWith("COMPETENCIA_FECHADA:")) {
+            return res.status(409).json({
+                erro: "Uma das competências já possui mensalidade paga " +
+                    "ou substituída. Escolha outro mês.",
+            });
+        }
+        console.error("Erro ao cadastrar cobrança extra:", erro);
+        return res.status(500).json({
+            erro: "Erro interno ao cadastrar cobrança extra",
+        });
+    }
+}
+async function listarCobrancasExtrasAdmin(req, res) {
+    try {
+        const clienteId = req.query.clienteId;
+        if (clienteId !== undefined &&
+            (typeof clienteId !== "string" || !clienteId.trim())) {
+            return res.status(400).json({
+                erro: "ID do cliente inválido",
+            });
+        }
+        const cobrancas = await prisma.pix_CobrancaExtra.findMany({
+            where: clienteId ? { clienteId } : {},
+            include: {
+                parcelas: {
+                    orderBy: {
+                        numeroParcela: "asc",
+                    },
+                },
+            },
+            orderBy: {
+                dataCriacao: "desc",
+            },
+        });
+        return res.json({
+            sucesso: true,
+            cobrancas,
+        });
+    }
+    catch (erro) {
+        console.error("Erro ao listar cobranças extras:", erro);
+        return res.status(500).json({
+            erro: "Erro interno ao listar cobranças extras",
+        });
+    }
+}
+async function quitarCobrancaExtra(req, res) {
+    try {
+        const { id } = req.params;
+        const { parcelasIds } = req.body || {};
+        if (typeof id !== "string" ||
+            !id.trim() ||
+            !Array.isArray(parcelasIds) ||
+            parcelasIds.length === 0 ||
+            parcelasIds.length > 60 ||
+            parcelasIds.some((parcelaId) => typeof parcelaId !== "string" || !parcelaId.trim()) ||
+            new Set(parcelasIds).size !== parcelasIds.length) {
+            return res.status(400).json({
+                erro: "Selecione parcelas válidas para confirmar",
+            });
+        }
+        const resultado = await prisma.$transaction(async (tx) => {
+            const referencia = await tx.pix_CobrancaExtra.findUnique({
+                where: { id },
+                select: { clienteId: true },
+            });
+            if (!referencia) {
+                return { tipo: "NAO_ENCONTRADA" };
+            }
+            await tx.$queryRaw `
+          SELECT "id"
+          FROM "Pix_Cliente"
+          WHERE "id" = ${referencia.clienteId}
+          FOR UPDATE
+        `;
+            const cobranca = await tx.pix_CobrancaExtra.findUnique({
+                where: { id },
+                include: {
+                    parcelas: {
+                        include: {
+                            mensalidade: true,
+                        },
+                    },
+                },
+            });
+            if (!cobranca) {
+                return { tipo: "NAO_ENCONTRADA" };
+            }
+            if (cobranca.cancelada) {
+                return { tipo: "CANCELADA" };
+            }
+            const selecionadas = cobranca.parcelas.filter((parcela) => parcelasIds.includes(parcela.id));
+            if (selecionadas.length !== parcelasIds.length) {
+                return { tipo: "PARCELAS_INVALIDAS" };
+            }
+            if (selecionadas.some((parcela) => !!parcela.dataPagamento)) {
+                return { tipo: "PARCELA_JA_PAGA" };
+            }
+            if (selecionadas.some((parcela) => parcela.mensalidade &&
+                !["ABERTO", "VENCIDO"].includes(parcela.mensalidade.status))) {
+                return { tipo: "MENSALIDADE_FECHADA" };
+            }
+            const descontos = new Map();
+            for (const parcela of selecionadas) {
+                if (!parcela.mensalidadeId)
+                    continue;
+                descontos.set(parcela.mensalidadeId, (descontos.get(parcela.mensalidadeId) || 0) +
+                    parcela.valorCentavos);
+            }
+            for (const [mensalidadeId, desconto] of descontos) {
+                const mensalidade = await tx.pix_PagamentoCliente.findUnique({
+                    where: { id: mensalidadeId },
+                });
+                if (!mensalidade ||
+                    !["ABERTO", "VENCIDO"].includes(mensalidade.status)) {
+                    return { tipo: "MENSALIDADE_FECHADA" };
+                }
+                const valorAtual = converterValorParaCentavos(mensalidade.valor);
+                if (valorAtual === null || valorAtual < desconto) {
+                    throw new Error("VALOR_MENSALIDADE_INVALIDO");
+                }
+                const saldoRestante = valorAtual - desconto;
+                await tx.pix_PagamentoCliente.update({
+                    where: { id: mensalidadeId },
+                    data: {
+                        valor: valorEmReais(saldoRestante),
+                        status: saldoRestante === 0
+                            ? "ENCERRADO_SEM_SALDO"
+                            : mensalidade.status,
+                        avisosEnviados: [],
+                    },
+                });
+            }
+            const agora = new Date();
+            const atualizacao = await tx.pix_ParcelaExtra.updateMany({
+                where: {
+                    cobrancaExtraId: id,
+                    id: { in: parcelasIds },
+                    dataPagamento: null,
+                },
+                data: {
+                    dataPagamento: agora,
+                },
+            });
+            if (atualizacao.count !== selecionadas.length) {
+                throw new Error("PARCELAS_NAO_ATUALIZADAS");
+            }
+            const totalPagoCentavos = selecionadas.reduce((total, parcela) => total + parcela.valorCentavos, 0);
+            return {
+                tipo: "CONFIRMADA",
+                parcelasPagas: selecionadas.length,
+                totalPagoCentavos,
+            };
+        }, { timeout: 15000 });
+        if (resultado.tipo === "NAO_ENCONTRADA") {
+            return res.status(404).json({
+                erro: "Cobrança extra não encontrada",
+            });
+        }
+        if (resultado.tipo === "CANCELADA") {
+            return res.status(409).json({
+                erro: "Esta cobrança foi cancelada",
+            });
+        }
+        if (resultado.tipo === "PARCELAS_INVALIDAS") {
+            return res.status(400).json({
+                erro: "Uma ou mais parcelas não pertencem à cobrança",
+            });
+        }
+        if (resultado.tipo === "PARCELA_JA_PAGA") {
+            return res.status(409).json({
+                erro: "Uma das parcelas selecionadas já foi paga",
+            });
+        }
+        if (resultado.tipo === "MENSALIDADE_FECHADA") {
+            return res.status(409).json({
+                erro: "Uma das parcelas pertence a uma mensalidade finalizada",
+            });
+        }
+        return res.json({
+            sucesso: true,
+            mensagem: "Pagamento das parcelas confirmado",
+            parcelasPagas: resultado.parcelasPagas,
+            totalPago: valorEmReais(resultado.totalPagoCentavos ?? 0),
+        });
+    }
+    catch (erro) {
+        console.error("Erro ao confirmar parcelas extras:", erro);
+        return res.status(500).json({
+            erro: "Erro interno ao confirmar parcelas extras",
+        });
+    }
+}
+async function cancelarCobrancaExtra(req, res) {
+    try {
+        const { id } = req.params;
+        if (typeof id !== "string" || !id.trim()) {
+            return res.status(400).json({
+                erro: "ID da cobrança extra inválido",
+            });
+        }
+        const resultado = await prisma.$transaction(async (tx) => {
+            const referencia = await tx.pix_CobrancaExtra.findUnique({
+                where: { id },
+                select: { clienteId: true },
+            });
+            if (!referencia) {
+                return { tipo: "NAO_ENCONTRADA" };
+            }
+            // Impede alterações financeiras simultâneas do cliente.
+            await tx.$queryRaw `
+          SELECT "id"
+          FROM "Pix_Cliente"
+          WHERE "id" = ${referencia.clienteId}
+          FOR UPDATE
+        `;
+            const cobranca = await tx.pix_CobrancaExtra.findUnique({
+                where: { id },
+                include: {
+                    parcelas: {
+                        include: {
+                            mensalidade: true,
+                        },
+                    },
+                },
+            });
+            if (!cobranca) {
+                return { tipo: "NAO_ENCONTRADA" };
+            }
+            if (cobranca.cancelada) {
+                return { tipo: "JA_CANCELADA" };
+            }
+            const pendentes = cobranca.parcelas.filter((parcela) => !parcela.dataPagamento);
+            // Não altera mensalidades já finalizadas.
+            if (pendentes.some((parcela) => parcela.mensalidade &&
+                !["ABERTO", "VENCIDO"].includes(parcela.mensalidade.status))) {
+                return { tipo: "MENSALIDADE_FECHADA" };
+            }
+            const descontos = new Map();
+            for (const parcela of pendentes) {
+                if (!parcela.mensalidadeId)
+                    continue;
+                descontos.set(parcela.mensalidadeId, (descontos.get(parcela.mensalidadeId) || 0) +
+                    parcela.valorCentavos);
+            }
+            for (const [mensalidadeId, desconto] of descontos) {
+                const mensalidade = await tx.pix_PagamentoCliente.findUnique({
+                    where: { id: mensalidadeId },
+                });
+                if (!mensalidade ||
+                    !["ABERTO", "VENCIDO"].includes(mensalidade.status)) {
+                    return { tipo: "MENSALIDADE_FECHADA" };
+                }
+                const valorAtual = converterValorParaCentavos(mensalidade.valor);
+                if (valorAtual === null || valorAtual < desconto) {
+                    throw new Error("VALOR_MENSALIDADE_INVALIDO");
+                }
+                const saldoRestante = valorAtual - desconto;
+                await tx.pix_PagamentoCliente.update({
+                    where: { id: mensalidadeId },
+                    data: {
+                        valor: valorEmReais(saldoRestante),
+                        status: saldoRestante === 0
+                            ? "ENCERRADO_SEM_SALDO"
+                            : mensalidade.status,
+                        avisosEnviados: [],
+                    },
+                });
+            }
+            await tx.pix_CobrancaExtra.update({
+                where: { id },
+                data: { cancelada: true },
+            });
+            return {
+                tipo: "CANCELADA",
+                parcelasCanceladas: pendentes.length,
+                valorCanceladoCentavos: pendentes.reduce((total, parcela) => total + parcela.valorCentavos, 0),
+            };
+        }, { timeout: 15000 });
+        if (resultado.tipo === "NAO_ENCONTRADA") {
+            return res.status(404).json({
+                erro: "Cobrança extra não encontrada",
+            });
+        }
+        if (resultado.tipo === "JA_CANCELADA") {
+            return res.status(409).json({
+                erro: "Esta cobrança já foi cancelada",
+            });
+        }
+        if (resultado.tipo === "MENSALIDADE_FECHADA") {
+            return res.status(409).json({
+                erro: "Não é possível cancelar parcelas vinculadas " +
+                    "a mensalidades finalizadas",
+            });
+        }
+        return res.json({
+            sucesso: true,
+            mensagem: "Cobrança extra cancelada com sucesso",
+            parcelasCanceladas: resultado.parcelasCanceladas,
+            valorCancelado: valorEmReais(resultado.valorCanceladoCentavos ?? 0),
+        });
+    }
+    catch (erro) {
+        console.error("Erro ao cancelar cobrança extra:", erro);
+        return res.status(500).json({
+            erro: "Erro interno ao cancelar cobrança extra",
+        });
+    }
+}
+// =====================================
+// IKPAY - ROTAS ADMINISTRATIVAS
+// =====================================
+app.get("/admin/mensalidades", verifyJwtPessoa, verificarAdministradorAtivo, listarMensalidadesAdmin);
+app.patch("/admin/mensalidades/:id/confirmar-pagamento", verifyJwtPessoa, verificarAdministradorAtivo, confirmarPagamentoMensalidade);
+// =====================================
+// ROTAS ADMIN - COBRANÇAS EXTRAS
+// =====================================
+app.post("/admin/cobrancas-extras", verifyJwtPessoa, verificarAdministradorAtivo, cadastrarCobrancaExtra);
+app.get("/admin/cobrancas-extras", verifyJwtPessoa, verificarAdministradorAtivo, listarCobrancasExtrasAdmin);
+app.patch("/admin/cobrancas-extras/:id/quitar", verifyJwtPessoa, verificarAdministradorAtivo, quitarCobrancaExtra);
+app.patch("/admin/cobrancas-extras/:id/cancelar", verifyJwtPessoa, verificarAdministradorAtivo, cancelarCobrancaExtra);
+//git add . 
+//git commit -m "msg"
+//git push 
+// Aplicação já está ouvindo acima; evite múltiplos app.listen.
 //git add . 
 //git commit -m "msg"
 //git push 
