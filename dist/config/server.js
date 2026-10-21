@@ -589,6 +589,7 @@ async function processarPagamentosPendentes() {
                 data: { lt: limite },
                 mercadoPagoId: { not: null },
                 NOT: { mercadoPagoId: "CASH" },
+                OR: [{ operadora: null }, { operadora: { not: "Stone" } }],
             },
             take: 200,
             orderBy: { data: "asc" },
@@ -785,7 +786,10 @@ wss.on("connection", (socket, req) => {
                     socket.send(JSON.stringify({ type: "error", message: "requestId obrigatório no ack" }));
                     return;
                 }
-                const confirmado = await confirmarPendenciaWs(requestId, machineId, nivelDeSinal);
+                const confirmado = requestId.startsWith("stone-")
+                    ? await (0, stone_payments_1.confirmarEntregaStone)(prisma, requestId, machineId, msg?.executed)
+                    : msg?.executed === false ? false
+                        : await confirmarPendenciaWs(requestId, machineId, nivelDeSinal);
                 socket.send(JSON.stringify({
                     type: "pulse_ack_result",
                     machineId,

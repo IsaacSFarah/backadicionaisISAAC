@@ -1,5 +1,5 @@
 import { calcularPulsosDinamicos } from "./payment-pulses";
-import { registrarRotaPagamentosStone } from "./stone-payments";
+import { confirmarEntregaStone, registrarRotaPagamentosStone } from "./stone-payments";
 
 import { Pix_Pagamento, PrismaClient, StatusPgto } from "@prisma/client";
 import express from 'express';
@@ -758,6 +758,7 @@ async function processarPagamentosPendentes() {
         data: { lt: limite },
         mercadoPagoId: { not: null },
         NOT: { mercadoPagoId: "CASH" },
+        OR: [{ operadora: null }, { operadora: { not: "Stone" } }],
       },
       take: 200,
       orderBy: { data: "asc" },
@@ -988,7 +989,10 @@ wss.on("connection", (socket, req) => {
           return;
         }
 
-        const confirmado = await confirmarPendenciaWs(requestId, machineId, nivelDeSinal);
+        const confirmado = requestId.startsWith("stone-")
+          ? await confirmarEntregaStone(prisma, requestId, machineId, msg?.executed)
+          : msg?.executed === false ? false
+          : await confirmarPendenciaWs(requestId, machineId, nivelDeSinal);
         socket.send(JSON.stringify({
           type: "pulse_ack_result",
           machineId,

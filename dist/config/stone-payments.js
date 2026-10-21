@@ -5,6 +5,7 @@ exports.validarPagamentoStone = validarPagamentoStone;
 exports.pagamentoStoneId = pagamentoStoneId;
 exports.registrarPagamentoStone = registrarPagamentoStone;
 exports.registrarRotaPagamentosStone = registrarRotaPagamentosStone;
+exports.confirmarEntregaStone = confirmarEntregaStone;
 const crypto_1 = require("crypto");
 class StonePaymentError extends Error {
     constructor(status, code) {
@@ -32,7 +33,7 @@ function validarPagamentoStone(body) {
         throw new StonePaymentError(400, "PAGAMENTO_INVALIDO");
     }
     return { maquinaId, idPagamento, tipo: tipo,
-        valor: (centavos / 100).toFixed(2), centavos };
+        valor: String(centavos / 100), centavos };
 }
 /** Identidade global Stone: reenvio e concorrência não criam uma segunda venda. */
 function pagamentoStoneId(idPagamento) {
@@ -78,7 +79,15 @@ async function registrarPagamentoStone(prisma, calcular, body) {
                 operadora: "Stone", status: "PENDENTE", estornado: false,
                 valorBonus: calculo.bonus,
             } });
-        // Não altera valorDoPix nem dispara tentarEnviarCreditoViaWs: transporte ainda indefinido.
+        // Atualiza apenas os metadados da venda; não disponibiliza crédito em valorDoPix.
+        // A entrega ao ESP e sua confirmação ainda não estão ligadas ao pagamento Stone.
+        await tx.pix_Maquina.update({
+            where: { id: maquina.id },
+            data: {
+                metodoPagamento: metodos[entrada.tipo],
+                ultimoPagamentoRecebido: pagamento.data,
+            },
+        });
         return { criado: true, pagamento, creditos };
     });
 }
@@ -106,4 +115,17 @@ function registrarRotaPagamentosStone(app, prisma, calcular) {
             return res.status(500).json({ ok: false, erro: "ERRO_REGISTRO_PAGAMENTO" });
         }
     });
+}
+/** ACK de entrega física Stone, correlacionado com o ID persistido da venda. */
+async function confirmarEntregaStone(prisma, requestId, machineId, executed) {
+    if (!/^stone-[a-f0-9]{64}$/.test(requestId) || executed !== true)
+        return false;
+    const where = { id: requestId, maquinaId: machineId, operadora: "Stone", estornado: false };
+    const result = await prisma.pix_Pagamento.updateMany({
+        where: { ...where, status: "PENDENTE" }, data: { status: "CONFIRMADO" },
+    });
+    if (result.count > 0)
+        return true;
+    // ACK repetido após perda de conexão também deve ser reconhecido.
+    return !!await prisma.pix_Pagamento.findFirst({ where: { ...where, status: "CONFIRMADO" } });
 }

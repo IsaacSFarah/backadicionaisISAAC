@@ -77,12 +77,11 @@ export async function registrarPagamentoStone(
       operadora: "Stone", status: "PENDENTE", estornado: false,
       valorBonus: calculo.bonus,
     } });
-    // A venda e o crédito da máquina são gravados na mesma transação.
-    // Reenvios retornam antes deste ponto para não repor créditos já consumidos.
+    // Atualiza apenas os metadados da venda; não disponibiliza crédito em valorDoPix.
+    // A entrega ao ESP e sua confirmação ainda não estão ligadas ao pagamento Stone.
     await tx.pix_Maquina.update({
       where: { id: maquina.id },
       data: {
-        valorDoPix: entrada.valor,
         metodoPagamento: metodos[entrada.tipo],
         ultimoPagamentoRecebido: pagamento.data,
       },
@@ -114,4 +113,17 @@ export function registrarRotaPagamentosStone(app: Express, prisma: PrismaClient,
       return res.status(500).json({ ok: false, erro: "ERRO_REGISTRO_PAGAMENTO" });
     }
   });
+}
+
+/** ACK de entrega física Stone, correlacionado com o ID persistido da venda. */
+export async function confirmarEntregaStone(prisma: PrismaClient, requestId: string,
+  machineId: string, executed: unknown) {
+  if (!/^stone-[a-f0-9]{64}$/.test(requestId) || executed !== true) return false;
+  const where = { id: requestId, maquinaId: machineId, operadora: "Stone", estornado: false };
+  const result = await prisma.pix_Pagamento.updateMany({
+    where: { ...where, status: "PENDENTE" }, data: { status: "CONFIRMADO" },
+  });
+  if (result.count > 0) return true;
+  // ACK repetido após perda de conexão também deve ser reconhecido.
+  return !!await prisma.pix_Pagamento.findFirst({ where: { ...where, status: "CONFIRMADO" } });
 }
