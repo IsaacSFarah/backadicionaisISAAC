@@ -28,7 +28,7 @@ export function validarPagamentoStone(body: any) {
     throw new StonePaymentError(400, "PAGAMENTO_INVALIDO");
   }
   return { maquinaId, idPagamento, tipo: tipo as keyof typeof metodos,
-    valor: (centavos / 100).toFixed(2), centavos };
+    valor: String(centavos / 100), centavos };
 }
 
 /** Identidade global Stone: reenvio e concorrência não criam uma segunda venda. */
@@ -77,7 +77,16 @@ export async function registrarPagamentoStone(
       operadora: "Stone", status: "PENDENTE", estornado: false,
       valorBonus: calculo.bonus,
     } });
-    // Não altera valorDoPix nem dispara tentarEnviarCreditoViaWs: transporte ainda indefinido.
+    // A venda e o crédito da máquina são gravados na mesma transação.
+    // Reenvios retornam antes deste ponto para não repor créditos já consumidos.
+    await tx.pix_Maquina.update({
+      where: { id: maquina.id },
+      data: {
+        valorDoPix: entrada.valor,
+        metodoPagamento: metodos[entrada.tipo],
+        ultimoPagamentoRecebido: pagamento.data,
+      },
+    });
     return { criado: true, pagamento, creditos };
   });
 }
