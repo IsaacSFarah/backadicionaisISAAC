@@ -943,18 +943,22 @@ wss.on("connection", (socket, req) => {
         });
         espSocketToMachineId.set(socket, machineId);
 
-        await registrarHeartbeatEsp(
+        
+socket.send(JSON.stringify({
+  type: "hello_ack",
+  ok: true,
+  machineId,
+  ackTimeoutMs: ESP_WS_ACK_TIMEOUT_MS,
+}));
+
+void registrarHeartbeatEsp(
   machineId,
   nivelDeSinal,
   true
-);
+).catch((err) => {
+  console.error("Erro ao registrar HELLO WS:", err);
+});
 
-        socket.send(JSON.stringify({
-          type: "hello_ack",
-          ok: true,
-          machineId,
-          ackTimeoutMs: ESP_WS_ACK_TIMEOUT_MS,
-        }));
 
         console.log(`
 🔌 ESP ONLINE VIA WS
