@@ -433,9 +433,10 @@ const estavaOffline =
   tempoOffline(maquinaDebug.ultimaRequisicao) >=
     MAQUINA_OFFLINE_ESTORNO_SEGUNDOS;
   
-  console.log("Máquina encontrada:", maquinaDebug);
-  console.log("=====================================");
+                        //console.log("Máquina encontrada:", maquinaDebug);
+                        //console.log("=====================================");
 
+  
   espUltimoHeartbeat.set(machineId, agora);
 
   const dataAtualizacao: any = {
