@@ -976,11 +976,27 @@ wss.on("connection", (socket, req) => {
 
       conexao.lastSeenAt = Date.now();
 
-      if (tipo === "heartbeat") {
-        await registrarHeartbeatEsp(machineId, nivelDeSinal);
-        socket.send(JSON.stringify({ type: "heartbeat_ack", machineId, serverTime: Date.now() }));
-        return;
-      }
+      
+if (tipo === "heartbeat") {
+  // Responde imediatamente à ESP32.
+  socket.send(JSON.stringify({
+    type: "heartbeat_ack",
+    machineId,
+    serverTime: Date.now()
+  }));
+
+  // Atualiza o banco sem atrasar a resposta WebSocket.
+  void registrarHeartbeatEsp(machineId, nivelDeSinal)
+    .catch((err) => {
+      console.error(
+        "Erro ao registrar heartbeat WS:",
+        err
+      );
+    });
+
+  return;
+}
+
 
       if (tipo === "pulse_ack") {
         const requestId = String(msg?.requestId || "").trim();
