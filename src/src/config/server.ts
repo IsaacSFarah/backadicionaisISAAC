@@ -414,9 +414,9 @@ async function registrarHeartbeatEsp(
   agora - ultima < ESP_HEARTBEAT_WRITE_MS
 ) return;
 
-  console.log("========== HEARTBEAT DEBUG ==========");
-  console.log("machineId recebido:", machineId);
-  console.log("tipo:", typeof machineId);
+                        //console.log("========== HEARTBEAT DEBUG ==========");
+                        //console.log("machineId recebido:", machineId);
+                        //console.log("tipo:", typeof machineId);
 
   const maquinaDebug = await prisma.pix_Maquina.findUnique({
   where: { id: machineId },
