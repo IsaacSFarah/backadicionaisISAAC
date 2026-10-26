@@ -1018,9 +1018,8 @@ if (tipo === "heartbeat") {
         }
 
         const confirmado = requestId.startsWith("stone-")
-          ? await confirmarEntregaStone(prisma, requestId, machineId, msg?.executed)
-          : msg?.executed === false ? false
-          : await confirmarPendenciaWs(requestId, machineId, nivelDeSinal);
+  ? await confirmarEntregaStone(prisma, requestId, machineId, msg?.executed)
+  : await confirmarPendenciaWs(requestId, machineId, nivelDeSinal);
         socket.send(JSON.stringify({
           type: "pulse_ack_result",
           machineId,
