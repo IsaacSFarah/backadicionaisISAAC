@@ -1004,6 +1004,13 @@ if (tipo === "heartbeat") {
 
 
       if (tipo === "pulse_ack") {
+        console.log("📩 ACK RECEBIDO DA CONTROLADORA", {
+  machineId,
+  requestId: msg?.requestId,
+  executed: msg?.executed,
+  rssi: msg?.rssi,
+  horario: new Date().toISOString()
+});
         const requestId = String(msg?.requestId || "").trim();
         if (!requestId) {
           socket.send(JSON.stringify({ type: "error", message: "requestId obrigatório no ack" }));
