@@ -3106,10 +3106,11 @@ if (estavaOffline && maquina.clienteId) {
   maquinasNotificadasOffline.delete(maquinaId);
 
   void enviarPushCliente(
-    String(maquina.clienteId),
-    "Máquina Online 🟢",
-    `${maquina.nome || "Máquina"} ficou online`
-  );
+  String(maquina.clienteId),
+  "Máquina Online 🟢",
+  `${maquina.nome || "Máquina"} ficou online`,
+  "MAQUINA_ON"
+);
 } else {
   maquinasNotificadasOffline.delete(maquinaId);
 }
