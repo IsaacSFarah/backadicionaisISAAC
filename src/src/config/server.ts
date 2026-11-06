@@ -428,26 +428,18 @@ async function registrarHeartbeatEsp(
   },
 });
 
-  // 🔍 DEBUG - IDENTIFICAR ESP32
-console.log("========== DEBUG ESP32 ==========");
-console.log("ID recebido:", machineId);
-console.log("Máquina encontrada:", maquinaDebug);
-
+ // 🚨 LOG SOMENTE QUANDO A MÁQUINA NÃO EXISTIR
 if (!maquinaDebug) {
-  console.error("🚨 ESP32 NÃO CADASTRADA!");
-  console.error("🚨 ID que está causando erro:", machineId);
-  console.error("================================");
+  console.error(`
+🚨 =====================================
+🚨 ERRO: ESP32 NÃO CADASTRADA
+🚨 ID recebido: ${machineId}
+🚨 Origem: Heartbeat WebSocket
+🚨 Horário: ${new Date().toLocaleString("pt-BR")}
+🚨 =====================================
+  `);
   return;
 }
-
-console.log("✅ ESP32 cadastrada:", maquinaDebug.nome);
-console.log("================================");
-
-const estavaOffline =
-  !maquinaDebug?.ultimaRequisicao ||
-  tempoOffline(maquinaDebug.ultimaRequisicao) >=
-    MAQUINA_OFFLINE_ESTORNO_SEGUNDOS;
-  
                         //console.log("Máquina encontrada:", maquinaDebug);
                         //console.log("=====================================");
 
