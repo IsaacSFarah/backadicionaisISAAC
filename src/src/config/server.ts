@@ -418,7 +418,8 @@ async function registrarHeartbeatEsp(
                         //console.log("machineId recebido:", machineId);
                         //console.log("tipo:", typeof machineId);
 
-  const maquinaDebug = await prisma.pix_Maquina.findUnique({
+  
+const maquinaDebug = await prisma.pix_Maquina.findUnique({
   where: { id: machineId },
   select: {
     id: true,
@@ -428,23 +429,26 @@ async function registrarHeartbeatEsp(
   },
 });
 
-
-  // 🚨 LOG SOMENTE QUANDO A MÁQUINA NÃO EXISTIR
-  if (!maquinaDebug) {
-    console.error(`
+// 🚨 Log somente quando a máquina não existir
+if (!maquinaDebug) {
+  console.error(`
 🚨 =====================================
 🚨 ERRO: ESP32 NÃO CADASTRADA
 🚨 ID recebido: ${machineId}
 🚨 Origem: Heartbeat WebSocket
-🚨 Horário: ${new Date().toLocaleString("pt-BR")}
+🚨 Horário: ${new Date().toISOString()}
 🚨 =====================================
-    `);
+  `);
 
-    return;
-  }
+  return;
+}
 
-                        //console.log("Máquina encontrada:", maquinaDebug);
-                        //console.log("=====================================");
+// Verifica se a máquina estava offline
+const estavaOffline =
+  !maquinaDebug.ultimaRequisicao ||
+  tempoOffline(maquinaDebug.ultimaRequisicao) >=
+    MAQUINA_OFFLINE_ESTORNO_SEGUNDOS;
+
 
   
   espUltimoHeartbeat.set(machineId, agora);
