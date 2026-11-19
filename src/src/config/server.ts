@@ -8724,16 +8724,18 @@ app.get("/machines-adm", verifyJwtPessoa, async (req: any, res) => {
       }
 
       const maquinaDetalhe = {
-        status: status,
-        nome: maquina.nome,
-        descricao: maquina.descricao || "",
-        store_id: maquina.store_id || "",
-        maquininha_serial: maquina.maquininha_serial || "",
-        nivelDeSinal: maquina.nivelDeSinal || null,
-        bonusAtivo: maquina.bonusAtivo,
-        bonusRegras: maquina.bonusRegras,
-        clienteNome: maquina.cliente ? maquina.cliente.nome : "",
-      };
+  id: maquina.id,
+  status: status,
+  nome: maquina.nome,
+  descricao: maquina.descricao || "",
+  store_id: maquina.store_id || "",
+  maquininha_serial: maquina.maquininha_serial || "",
+  nivelDeSinal: maquina.nivelDeSinal ?? null,
+  bonusAtivo: maquina.bonusAtivo,
+  bonusRegras: maquina.bonusRegras,
+  bloqueadaMensalidade: maquina.bloqueadaMensalidade,
+  clienteNome: maquina.cliente ? maquina.cliente.nome : "",
+};
 
       // Separando as máquinas em online e offline
       if (status === 'online' || status === 'PAGAMENTO_RECENTE') {
