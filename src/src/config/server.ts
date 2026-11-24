@@ -6179,15 +6179,21 @@ app.get("/pagamentos/:maquinaId", verifyJWT, async (req: any, res) => {
       if (pagamento.tipo === "CASH" || pagamento.mercadoPagoId === "CASH") {
         totalEspecie += parseFloat(pagamento.valor)
         valorCash += parseFloat(pagamento.valor)
-      } else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money") {
+      } else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money" || pagamento.tipo === "digital_currency" || pagamento.tipo === "11") {
         valorPix += parseFloat(pagamento.valor)
-        taxaPix += parseFloat(pagamento.taxas!)
-      } else if (pagamento.tipo === "debit_card") {
+        if(pagamento.taxas){
+          taxaPix += parseFloat(pagamento.taxas!)
+        }
+      } else if (pagamento.tipo === "debit_card" || pagamento.tipo === "8") {
         valorCartaoDebito += parseFloat(pagamento.valor)
-        taxaCartaoDebito += parseFloat(pagamento.taxas!)
-      } else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card") {
+        if(pagamento.taxas){
+          taxaCartaoDebito += parseFloat(pagamento.taxas!)
+        }
+      } else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card" || pagamento.tipo === "1") {
         valorCartaoCredito += parseFloat(pagamento.valor)
-        taxaCartaoCredito += parseFloat(pagamento.taxas!)
+        if(pagamento.taxas){
+          taxaCartaoCredito += parseFloat(pagamento.taxas!)
+        }
       }
 
       qtd += 1;
@@ -6283,15 +6289,21 @@ app.get("/pagamentos-adm/:maquinaId", verifyJwtPessoa, async (req: any, res) => 
       if (pagamento.tipo === "CASH" || pagamento.mercadoPagoId === "CASH") {
         totalEspecie += parseFloat(pagamento.valor)
         valorCash += parseFloat(pagamento.valor)
-      } else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money") {
+      } else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money" || pagamento.tipo === "digital_currency" || pagamento.tipo === "11") {
         valorPix += parseFloat(pagamento.valor)
-        taxaPix += parseFloat(pagamento.taxas!)
-      } else if (pagamento.tipo === "debit_card") {
+        if(pagamento.taxas){
+          taxaPix += parseFloat(pagamento.taxas!)
+        }
+      } else if (pagamento.tipo === "debit_card" || pagamento.tipo === "8") {
         valorCartaoDebito += parseFloat(pagamento.valor)
-        taxaCartaoDebito += parseFloat(pagamento.taxas!)
-      } else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card") {
+        if(pagamento.taxas){
+          taxaCartaoDebito += parseFloat(pagamento.taxas!)
+        }
+      } else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card" || pagamento.tipo === "1") {
         valorCartaoCredito += parseFloat(pagamento.valor)
-        taxaCartaoCredito += parseFloat(pagamento.taxas!)
+        if(pagamento.taxas){
+          taxaCartaoCredito += parseFloat(pagamento.taxas!)
+        }
       }
 
       qtd += 1;
@@ -6439,13 +6451,19 @@ app.post("/pagamentos-periodo/:maquinaId", verifyJWT, async (req: any, res) => {
         valorCash += parseFloat(pagamento.valor)
       } else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money" || pagamento.tipo === "digital_currency" || pagamento.tipo === "11") {
         valorPix += parseFloat(pagamento.valor)
-        taxaPix += parseFloat(pagamento.taxas!)
+        if(pagamento.taxas){
+          taxaPix += parseFloat(pagamento.taxas!)
+        }
       } else if (pagamento.tipo === "debit_card" || pagamento.tipo === "8") {
         valorCartaoDebito += parseFloat(pagamento.valor)
-        taxaCartaoDebito += parseFloat(pagamento.taxas!)
+        if(pagamento.taxas){
+          taxaCartaoDebito += parseFloat(pagamento.taxas!)
+        }
       } else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card" || pagamento.tipo === "1") {
         valorCartaoCredito += parseFloat(pagamento.valor)
-        taxaCartaoCredito += parseFloat(pagamento.taxas!)
+        if(pagamento.taxas){
+          taxaCartaoCredito += parseFloat(pagamento.taxas!)
+        }
       }
 
       qtd += 1;
@@ -6591,13 +6609,19 @@ app.post("/pagamentos-periodo-adm/:maquinaId", verifyJwtPessoa, async (req: any,
         valorCash += parseFloat(pagamento.valor)
       } else if (pagamento.tipo === "bank_transfer" || pagamento.tipo === "account_money" || pagamento.tipo === "digital_currency" || pagamento.tipo === "11") {
         valorPix += parseFloat(pagamento.valor)
-        taxaPix += parseFloat(pagamento.taxas!)
+        if(pagamento.taxas){
+          taxaPix += parseFloat(pagamento.taxas!)
+        }
       } else if (pagamento.tipo === "debit_card" || pagamento.tipo === "8") {
         valorCartaoDebito += parseFloat(pagamento.valor)
-        taxaCartaoDebito += parseFloat(pagamento.taxas!)
+        if(pagamento.taxas){
+          taxaCartaoDebito += parseFloat(pagamento.taxas!)
+        }
       } else if (pagamento.tipo === "credit_card" || pagamento.tipo === "prepaid_card" || pagamento.tipo === "1") {
         valorCartaoCredito += parseFloat(pagamento.valor)
-        taxaCartaoCredito += parseFloat(pagamento.taxas!)
+        if(pagamento.taxas){
+          taxaCartaoCredito += parseFloat(pagamento.taxas!)
+        }
       }
 
       qtd += 1;
